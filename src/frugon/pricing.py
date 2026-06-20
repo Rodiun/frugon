@@ -1,0 +1,571 @@
+"""frugon pricing module.
+
+Pricing precedence rule (deterministic):
+  1. Our pricing table wins when the model is present there.
+  2. Fall back to tokencost TOKEN_COSTS for every model we don't carry.
+
+This means a user can pin specific prices without being overridden by a
+tokencost library update, while getting broad model coverage for free from
+tokencost for everything else.
+
+The ``pricing.json`` ``_last_synced`` date is exposed in every lookup result
+so a stale snapshot is visible to callers and report renderers.
+
+Writable pricing table location
+---------------------------------
+The live pricing table is stored in the user data directory
+(``~/.local/share/frugon/pricing.json`` on Linux/macOS,
+``%LOCALAPPDATA%\\frugon\\pricing.json`` on Windows via platformdirs).
+
+The wheel-bundled file at ``src/frugon/data/pricing.json`` is a read-only
+seed used only when no user-dir file exists yet.  ``frugon pricing update``
+always writes to the user data directory, so a reinstall or upgrade never
+silently reverts prices the user has synced.
+
+First-run behaviour
+-------------------
+On the first call to ``load_pricing_override()`` after a fresh install (or
+after clearing the user data dir), the module copies the bundled seed to
+the user data directory so subsequent writes have a sane starting point.
+"""
+
+from __future__ import annotations
+
+import functools
+import json
+import re
+import urllib.error
+from datetime import date as _date
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, NamedTuple
+
+from frugon import USER_AGENT
+from frugon._store import (
+    atomic_write_json,
+    fetch_url_with_retry,
+    load_json_or_empty,
+    seed_if_missing,
+    validate_fetch_url,
+)
+from frugon.model_id import base_family, canonicalize
+
+try:
+    import platformdirs as _platformdirs  # type: ignore[import-untyped]
+except ImportError as exc:  # pragma: no cover
+    raise ImportError(
+        "platformdirs is required. Install it: pip install platformdirs"
+    ) from exc
+
+try:
+    import tokencost as _tc  # type: ignore[import-untyped]
+except ImportError as exc:  # pragma: no cover
+    raise ImportError(
+        "tokencost is required for pricing. Install it: pip install tokencost"
+    ) from exc
+
+# ---------------------------------------------------------------------------
+# Path constants
+# ---------------------------------------------------------------------------
+
+# The wheel-bundled read-only seed.  Never written to by this module.
+_BUNDLED_SEED_PATH: Path = Path(__file__).parent / "data" / "pricing.json"
+
+# The writable user-data-dir path.  ``frugon pricing update`` (via cli.py)
+# imports ``_PRICING_JSON`` and passes it as ``output_path``; keeping this
+# name stable means no CLI changes are required.
+_PRICING_JSON: Path = Path(_platformdirs.user_data_dir("frugon")) / "pricing.json"
+
+_LITELLM_REGISTRY_URL = (
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/"
+    "model_prices_and_context_window.json"
+)
+
+_ALLOWED_PRICING_HOSTS: frozenset[str] = frozenset({"raw.githubusercontent.com"})
+
+_MAX_RESPONSE_BYTES = 16 * 1024 * 1024  # 16 MB cap
+
+# Retry parameters for the registry fetch.  raw.githubusercontent.com returns
+# sporadic 5xx under load, so a single bad response must not fail the whole
+# update — retry on HTTP 429, HTTP 5xx, and transient URLError/OSError with
+# exponential backoff.  Matched to the quality fetcher's budget for parity.
+_FETCH_MAX_RETRIES: int = 4
+_FETCH_BACKOFF_BASE: float = 1.0  # seconds; doubles each attempt: 1, 2, 4, 8
+
+
+# ---------------------------------------------------------------------------
+# Public types
+# ---------------------------------------------------------------------------
+
+
+class ModelPrice(NamedTuple):
+    """Resolved price for a single model."""
+
+    model: str
+    input_cost_per_token: Decimal
+    output_cost_per_token: Decimal
+    source: str  # "pricing.json" or "tokencost"
+    pricing_json_last_synced: str | None  # ISO date from pricing.json, or None
+
+
+# ---------------------------------------------------------------------------
+# Core read path
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Override-table cache
+# ---------------------------------------------------------------------------
+#
+# Parsing pricing.json is pure I/O + JSON decode + a full-table filter pass.
+# The cost engine calls ``get_model_price`` once per log record, so on a large
+# log (tens of thousands of calls) re-reading and re-parsing the same file every
+# time dominates the run — profiling a 56k-record log showed ~140s spent almost
+# entirely in ``load_pricing_override`` (JSON decode + the filter loop), versus
+# ~2s of actual record parsing.
+#
+# The table only changes when ``frugon pricing update`` rewrites the file, so we
+# cache the parsed result keyed on the resolved path together with its mtime and
+# size.  A mid-process update (a new file with a different mtime/size) is picked
+# up automatically; within a single analysis run the file is read exactly once.
+# ``clear_pricing_cache`` resets all caches for tests that swap the table out
+# from under us via monkeypatching.
+
+_OverrideTable = tuple[dict[str, dict[str, object]], str | None]
+_CacheKey = tuple[str, str, int, int]  # (override_path, seed_path, mtime_ns, size)
+
+# Cached (key -> parsed table); a single entry is kept for the live path so the
+# common case is one dict lookup and zero disk access after the first call.
+_override_cache: dict[_CacheKey, _OverrideTable] = {}
+
+
+def _override_cache_key() -> _CacheKey:
+    """Build a cache key from the resolved pricing path's identity + stat.
+
+    The key encodes the override path, the seed path, and whichever file
+    ``load_json_or_empty`` would actually read (user-dir file if present, else
+    bundled seed) by its ``(mtime_ns, size)``.  A missing file stats as
+    ``(0, 0)`` so the absent/error case is itself cacheable and stable.
+    """
+    if _PRICING_JSON.exists():
+        read_path = _PRICING_JSON
+    elif _BUNDLED_SEED_PATH.exists():
+        read_path = _BUNDLED_SEED_PATH
+    else:
+        read_path = _PRICING_JSON  # neither exists; stat below yields (0, 0)
+    try:
+        st = read_path.stat()
+        stat_part = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        stat_part = (0, 0)
+    return (str(_PRICING_JSON), str(_BUNDLED_SEED_PATH), stat_part[0], stat_part[1])
+
+
+def clear_pricing_cache() -> None:
+    """Drop all cached pricing state.
+
+    Call this when the on-disk pricing table is replaced out-of-band within the
+    same process (e.g. tests that monkeypatch ``_PRICING_JSON`` to a new file, or
+    code that updates pricing and re-analyzes in one run without the mtime
+    changing).  Production callers never need this — the mtime/size cache key
+    already invalidates on a real ``frugon pricing update``.
+    """
+    _override_cache.clear()
+    _resolve_model_price.cache_clear()
+
+
+def load_pricing_override() -> _OverrideTable:
+    """Load the pricing table from the user data directory.
+
+    On first use, the user-data-dir file is seeded from the wheel-bundled
+    snapshot if it does not yet exist.
+
+    Returns:
+        Tuple of (model_table, last_synced_date_or_None).
+
+    The model_table maps model name -> {"input_cost_per_token": float,
+    "output_cost_per_token": float}.
+
+    Does not raise on missing or malformed file -- returns empty dict so the
+    tokencost fallback takes over.
+
+    The parsed result is cached keyed on the pricing file's path + mtime + size,
+    so repeated calls within an analysis run (one per priced record) do not
+    re-read and re-parse the file.  The cache invalidates automatically when the
+    file is rewritten by ``frugon pricing update``.
+    """
+    seed_if_missing(_PRICING_JSON, _BUNDLED_SEED_PATH)
+
+    key = _override_cache_key()
+    cached = _override_cache.get(key)
+    if cached is not None:
+        return cached
+
+    raw = load_json_or_empty(_PRICING_JSON, _BUNDLED_SEED_PATH)
+
+    last_synced: str | None = raw.get("_last_synced")  # type: ignore[assignment]
+    models: dict[str, dict[str, object]] = {}
+
+    for table_key, val in raw.items():
+        if table_key.startswith("_"):
+            continue
+        if isinstance(val, dict) and "input_cost_per_token" in val:
+            models[table_key] = val  # type: ignore[assignment]
+
+    result: _OverrideTable = (models, last_synced)
+    # Keep only the current key — the path rarely changes, and bounding the dict
+    # avoids unbounded growth if a long-lived process cycles many pricing files.
+    _override_cache.clear()
+    _override_cache[key] = result
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Newest-dated tokencost fallback helpers
+# ---------------------------------------------------------------------------
+#
+# Purpose: resolve bare family names (e.g. "claude-3-5-sonnet") that exist in
+# tokencost only under dated variants (e.g. "claude-3-5-sonnet-20241022").
+#
+# Condition for use: ONLY when all three existing lookup steps (exact →
+# canonicalized → base_family) have already failed.  We then look for tokencost
+# keys of the form ``<base>-YYYYMMDD`` (compact date), collect those whose
+# price fields are both present and consistent, and pick the newest (max
+# lexicographic date).  Consistent = every dated variant of that family carries
+# the same (input, output) cost pair.  A price mismatch across dates means the
+# provider changed their rate and we cannot safely attribute one price to the
+# bare name — we return None rather than guess.
+#
+# This is deliberately NOT applied when the override-table or exact/canonical
+# steps succeed; it is a fallback of last resort, not the primary path.
+
+_COMPACT_DATE_SUFFIX_RE = re.compile(r"-(\d{8})$")
+
+
+def _newest_dated_tokencost_price(
+    base: str,
+    model: str,
+    tc_costs: dict[str, dict[str, object]],
+    last_synced: str | None,
+) -> ModelPrice | None:
+    """Return a price for bare *base* via the newest consistently-priced dated variant.
+
+    Scans *tc_costs* for keys matching ``<base>-YYYYMMDD``.  If at least one
+    such key exists AND all such keys share the same (input, output) cost pair,
+    returns the price attributed to the newest key.  Returns None if no dated
+    variants exist, any cost field is absent on any variant, or prices differ
+    across variants (rate change — cannot safely attribute to the bare name).
+
+    *model* is the original user-supplied name stored in ModelPrice.model.
+    *base* is the canonicalized base-family form used to build the search prefix.
+    """
+    prefix = base + "-"
+    dated: list[tuple[str, Decimal, Decimal]] = []  # (key, input_cost, output_cost)
+    for key, entry in tc_costs.items():
+        if not key.startswith(prefix):
+            continue
+        suffix = key[len(prefix):]
+        if not _COMPACT_DATE_SUFFIX_RE.fullmatch(f"-{suffix}"):
+            # Suffix is not an 8-digit compact date — skip (could be a suffix like
+            # "-latest" or another name that starts with the same prefix).
+            continue
+        in_cost = entry.get("input_cost_per_token")
+        out_cost = entry.get("output_cost_per_token")
+        if in_cost is None or out_cost is None:
+            return None  # any dated variant missing cost → fail safe
+        dated.append((key, Decimal(str(in_cost)), Decimal(str(out_cost))))
+
+    if not dated:
+        return None
+
+    # Verify all dated variants share the same price (consistency check).
+    input_prices = {row[1] for row in dated}
+    output_prices = {row[2] for row in dated}
+    if len(input_prices) != 1 or len(output_prices) != 1:
+        # Price inconsistency across dated variants — provider changed rate.
+        # Cannot safely attribute a single price to the bare name.
+        return None
+
+    # Pick the newest: compact dates sort lexicographically (YYYYMMDD).
+    newest_key = max(dated, key=lambda row: row[0])[0]
+    in_c, out_c = input_prices.pop(), output_prices.pop()
+    return ModelPrice(
+        model=model,
+        input_cost_per_token=in_c,
+        output_cost_per_token=out_c,
+        source=f"tokencost[{newest_key}]",
+        pricing_json_last_synced=last_synced,
+    )
+
+
+@functools.lru_cache(maxsize=4096)
+def _resolve_model_price(model: str, _cache_key: _CacheKey) -> ModelPrice | None:
+    """Resolve and cache the price for *model* under a pricing-table identity.
+
+    The ``_cache_key`` argument is the override table's identity (path + mtime +
+    size, from :func:`_override_cache_key`).  It is part of the cache key so a
+    ``frugon pricing update`` (which changes the file's mtime/size) transparently
+    invalidates every memoized model — without it a long-lived process could
+    return prices from a superseded table.  The same key value is reused for
+    every record in one analysis run, so each distinct model is resolved exactly
+    once even across tens of thousands of calls.
+    """
+    override_table, last_synced = load_pricing_override()
+    tc_costs: dict[str, dict[str, object]] = _tc.TOKEN_COSTS  # type: ignore[attr-defined]
+
+    def _from_override(name: str) -> ModelPrice | None:
+        if name not in override_table:
+            return None
+        entry = override_table[name]
+        return ModelPrice(
+            model=model,
+            input_cost_per_token=Decimal(str(entry["input_cost_per_token"])),
+            output_cost_per_token=Decimal(str(entry["output_cost_per_token"])),
+            source="pricing.json",
+            pricing_json_last_synced=last_synced,
+        )
+
+    def _from_tokencost(name: str) -> ModelPrice | None:
+        if name not in tc_costs:
+            return None
+        entry = tc_costs[name]
+        if "input_cost_per_token" not in entry or "output_cost_per_token" not in entry:
+            return None
+        return ModelPrice(
+            model=model,
+            input_cost_per_token=Decimal(str(entry["input_cost_per_token"])),
+            output_cost_per_token=Decimal(str(entry["output_cost_per_token"])),
+            source="tokencost",
+            pricing_json_last_synced=last_synced,
+        )
+
+    def _lookup(name: str) -> ModelPrice | None:
+        return _from_override(name) or _from_tokencost(name)
+
+    # 1. Exact match
+    result = _lookup(model)
+    if result is not None:
+        return result
+
+    # 2. Canonicalized form (strips gateway prefixes, normalises Bedrock)
+    canon = canonicalize(model)
+    if canon != model:
+        result = _lookup(canon)
+        if result is not None:
+            return result
+
+    # 3. Base-family fallback (strips dated snapshot suffix — lookup only)
+    base = base_family(canon)
+    if base != canon:
+        result = _lookup(base)
+        if result is not None:
+            return result
+
+    # 4. Newest-dated tokencost fallback: when canon == base (no date suffix to
+    #    strip) and all three steps above missed, probe tokencost for consistently-
+    #    priced compact-dated variants of the base family.
+    #
+    #    This resolves bare Anthropic family names (e.g. "claude-3-5-sonnet",
+    #    "claude-3-opus") that tokencost only carries under dated keys
+    #    (e.g. "claude-3-5-sonnet-20241022").  The consistency gate ensures we
+    #    never fabricate a price when Anthropic has changed their list rate across
+    #    snapshot dates.
+    #
+    #    We use the base derived above (which equals canon when no suffix was
+    #    stripped) as the family prefix.  If canon had a date stripped (base !=
+    #    canon), the dated variant would already have been found in step 2 or 3;
+    #    this step is a no-op in that case.
+    result = _newest_dated_tokencost_price(base, model, tc_costs, last_synced)
+    if result is not None:
+        return result
+
+    return None
+
+
+class PricedModelRow(NamedTuple):
+    """One row for the ``frugon models`` discovery listing.
+
+    Costs are per-token Decimals, exactly as the pricing table stores them; the
+    renderer scales to a per-1M display unit.  *quality_tier* is the integer tier
+    from the quality table or :data:`frugon.quality.UNRATED_TIER` when the model
+    is unrated.
+    """
+
+    model: str
+    input_cost_per_token: Decimal
+    output_cost_per_token: Decimal
+    quality_tier: int
+
+
+def list_priced_models(query: str | None = None) -> list[PricedModelRow]:
+    """List models in the local pricing table, name-sorted, optionally filtered.
+
+    The source is the local pricing override table — the SAME table
+    ``--candidates`` resolves against — so every name returned is exactly a name
+    ``--candidates`` accepts.  Pure local read: no network, no tokencost fallback
+    (the fallback would surface names ``--candidates`` does not key on directly).
+
+    *query*, when given, filters to models whose name contains it
+    (case-insensitive substring).  Each row carries the per-token input/output
+    costs as stored and the model's quality tier (UNRATED_TIER when unrated).
+    """
+    from frugon.quality import get_model_tier
+
+    override_table, _last_synced = load_pricing_override()
+    needle = query.lower() if query else None
+
+    rows: list[PricedModelRow] = []
+    for name, entry in override_table.items():
+        if needle is not None and needle not in name.lower():
+            continue
+        rows.append(
+            PricedModelRow(
+                model=name,
+                input_cost_per_token=Decimal(str(entry["input_cost_per_token"])),
+                output_cost_per_token=Decimal(str(entry["output_cost_per_token"])),
+                quality_tier=get_model_tier(name),
+            )
+        )
+    rows.sort(key=lambda r: r.model)
+    return rows
+
+
+def get_model_price(model: str) -> ModelPrice | None:
+    """Resolve the price for *model*.
+
+    Lookup order: exact → canonicalize() → base_family() — first hit wins.
+    Existing behaviour for bare names is unchanged; gateway-prefixed and
+    dated-snapshot names now resolve transparently.
+
+    Precedence within each lookup step: pricing.json > tokencost.TOKEN_COSTS.
+    Returns None when the model is unknown in all three steps.
+
+    The resolution is memoized per ``(model, pricing-table-identity)`` so the
+    cost engine — which calls this once per log record — resolves each distinct
+    model name only once per run.  The memo invalidates automatically when the
+    pricing file is rewritten (its mtime/size change the cache key).
+    """
+    return _resolve_model_price(model, _override_cache_key())
+
+
+def is_model_known(model: str) -> bool:
+    """Return True if we can price *model*."""
+    return get_model_price(model) is not None
+
+
+# ---------------------------------------------------------------------------
+# Pricing update -- fetch LiteLLM registry, validate, atomic write
+# ---------------------------------------------------------------------------
+
+
+class PricingUpdateError(RuntimeError):
+    """Raised when pricing update fails (network error, malformed payload, I/O error)."""
+
+
+def fetch_and_update_pricing(
+    registry_url: str,
+    output_path: Path,
+    today_date_str: str,
+) -> dict[str, int]:
+    """Fetch the LiteLLM registry, validate, and atomically update *output_path*.
+
+    *output_path* should be the user data dir path (``_PRICING_JSON``) so
+    updates survive reinstalls.  The CLI passes ``_PRICING_JSON`` directly;
+    callers that need a custom destination (e.g. tests) pass their own path.
+
+    Returns {"models_synced": N} on success.
+    Raises PricingUpdateError on any failure -- *output_path* is never
+    modified if an error occurs before the final rename.
+    Raises ValueError if *registry_url* is not HTTPS or not in the allowed
+    host list.
+    """
+    validate_fetch_url(registry_url, _ALLOWED_PRICING_HOSTS)
+
+    # 1. Fetch (bounded retry on HTTP 429, HTTP 5xx, and transient network errors;
+    #    raw.githubusercontent.com 5xxs sporadically under load).
+    def _on_failure(exc: Exception) -> PricingUpdateError:
+        if isinstance(exc, urllib.error.HTTPError):
+            return PricingUpdateError("pricing registry unavailable")
+        return PricingUpdateError(f"Network error fetching registry: {exc}")
+
+    raw_bytes: bytes = fetch_url_with_retry(
+        registry_url,
+        user_agent=USER_AGENT,
+        max_bytes=_MAX_RESPONSE_BYTES,
+        timeout=30,
+        max_retries=_FETCH_MAX_RETRIES,
+        backoff_base=_FETCH_BACKOFF_BASE,
+        on_failure=_on_failure,
+    )
+
+    # 2. Parse
+    try:
+        raw: Any = json.loads(raw_bytes)
+    except json.JSONDecodeError as exc:
+        raise PricingUpdateError(f"JSON parse error in pricing registry: {exc}") from exc
+
+    # 3. Validate shape
+    if not isinstance(raw, dict):
+        raise PricingUpdateError(
+            f"Registry has unexpected shape (expected dict, got {type(raw).__name__})"
+        )
+    registry: dict[str, Any] = raw
+
+    # 4. Extract models with both cost fields
+    priced: dict[str, dict[str, object]] = {}
+    for model, entry in registry.items():
+        if model.startswith("_"):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if "input_cost_per_token" in entry and "output_cost_per_token" in entry:
+            priced[model] = {
+                "input_cost_per_token": entry["input_cost_per_token"],
+                "output_cost_per_token": entry["output_cost_per_token"],
+            }
+
+    if not priced:
+        raise PricingUpdateError(
+            "Registry contains no priced models (no entries with both "
+            "input_cost_per_token and output_cost_per_token) -- "
+            "refusing to overwrite pricing.json with no priced models"
+        )
+
+    # 5. Build output dict (metadata first, then models)
+    output: dict[str, object] = {
+        "_last_synced": today_date_str,
+        "_source": registry_url,
+        "_note": (
+            "Models listed here take precedence over tokencost for pricing. "
+            "Sync with: frugon pricing update"
+        ),
+    }
+    output.update(priced)
+
+    # 6. Atomic write via shared helper
+    try:
+        atomic_write_json(output_path, output)
+    except OSError as exc:
+        raise PricingUpdateError(f"Failed to write pricing.json: {exc}") from exc
+
+    return {"models_synced": len(priced)}
+
+
+def is_pricing_stale(
+    last_synced: str | None,
+    max_days: int = 30,
+    today: str | None = None,
+) -> bool:
+    """Return True if *last_synced* is at least *max_days* days before *today*.
+
+    Returns False when *last_synced* is None or cannot be parsed, so a missing
+    or malformed date never triggers a spurious warning.
+    """
+    if last_synced is None:
+        return False
+    try:
+        synced = _date.fromisoformat(last_synced)
+        today_date = _date.fromisoformat(today) if today else _date.today()
+        return (today_date - synced).days >= max_days
+    except ValueError:
+        return False

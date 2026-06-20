@@ -1,0 +1,45 @@
+# Internal files that must never enter this public repo.
+/CLAUDE.md
+/docs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg
+
+# Environments
+.venv/
+venv/
+.env
+.python-version
+
+# Test / coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# Captured logs / user data — never commit a user's traffic
+*.capture.jsonl
+captures/
+/report.html
+/report.md
+
+# Local agent config — never ship
+.claude/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.demo.env
+DOGFOOD_FINDINGS.md
+DEMO_SCRIPT.md

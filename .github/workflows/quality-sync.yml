@@ -1,0 +1,226 @@
+name: Quality sync
+
+on:
+  schedule:
+    # Every Monday at 07:00 UTC (offset from pricing-sync at 06:00)
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Install project
+        run: uv sync
+
+      - name: Capture old quality.json (pre-fetch baseline)
+        id: old_seed
+        run: |
+          # Export the committed version of the seed before the fetch overwrites it.
+          # If git show fails (seed never existed), OLD_QUALITY is left empty and
+          # classify_quality_update receives old=None (first-run path → MINOR).
+          if git show HEAD:src/frugon/data/quality.json > /tmp/quality_old.json 2>/dev/null; then
+            echo "has_old=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_old=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch new quality tiers
+        id: fetch
+        run: |
+          uv run python - <<'EOF'
+          from frugon.quality import fetch_and_update_quality, _HF_BASE_URL
+          from datetime import date
+          from pathlib import Path
+          result = fetch_and_update_quality(
+              _HF_BASE_URL,
+              Path("src/frugon/data/quality.json"),
+              date.today().isoformat(),
+          )
+          print(f"Synced {result['models_synced']} models")
+          EOF
+
+      - name: Check for changes
+        id: diff
+        run: |
+          if git diff --quiet src/frugon/data/quality.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate and classify update
+        id: classify
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          uv run python - <<'EOF'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          from frugon.quality import (
+              VERDICT_INVALID,
+              VERDICT_MAJOR,
+              VERDICT_MINOR,
+              classify_quality_update,
+          )
+
+          # Load the newly fetched seed.
+          new_path = Path("src/frugon/data/quality.json")
+          with new_path.open(encoding="utf-8") as fh:
+              new_data: dict[str, object] = json.load(fh)
+
+          # Load the old seed (may be absent on first run).
+          old_data: dict[str, object] | None = None
+          old_path = Path("/tmp/quality_old.json")
+          if old_path.exists():
+              try:
+                  with old_path.open(encoding="utf-8") as fh:
+                      old_data = json.load(fh)
+              except json.JSONDecodeError:
+                  old_data = None  # treat corrupt baseline as missing
+
+          verdict, reason = classify_quality_update(new_data, old_data)
+
+          # Emit outputs for downstream steps.
+          # Use a randomized heredoc delimiter so that fetched content in
+          # *reason* cannot escape through the delimiter boundary.
+          import secrets
+          github_output = os.environ.get("GITHUB_OUTPUT", "")
+          if github_output:
+              with open(github_output, "a", encoding="utf-8") as fh:
+                  fh.write(f"verdict={verdict}\n")
+                  # Reason may contain newlines — use a multiline delimiter.
+                  # The delimiter is randomized so fetched model names in the
+                  # reason string cannot terminate it prematurely.
+                  # Invariant: classify_quality_update reasons must never embed
+                  # raw fetched model names (enforced in quality.py).
+                  delimiter = f"EOF_REASON_{secrets.token_hex(8)}"
+                  fh.write(f"reason<<{delimiter}\n{reason}\n{delimiter}\n")
+
+          # Emit to step summary for visibility in the Actions UI.
+          step_summary = os.environ.get("GITHUB_STEP_SUMMARY", "")
+          if step_summary:
+              with open(step_summary, "a", encoding="utf-8") as fh:
+                  emoji = {"INVALID": "🔴", "MAJOR": "🟡", "MINOR": "🟢"}.get(verdict, "⚪")
+                  fh.write(f"## Quality sync verdict: {emoji} {verdict}\n\n")
+                  fh.write(f"**Reason:** {reason}\n")
+
+          print(f"Verdict: {verdict}")
+          print(f"Reason:  {reason}")
+
+          # INVALID — discard the new seed and fail so CI turns red.
+          if verdict == VERDICT_INVALID:
+              print("ERROR: Fetch produced invalid data — discarding and failing job.", file=sys.stderr)
+              sys.exit(1)
+          EOF
+
+      - name: Discard seed on INVALID verdict
+        if: steps.diff.outputs.changed == 'true' && failure() && steps.classify.outcome == 'failure'
+        run: |
+          git checkout -- src/frugon/data/quality.json
+          echo "Seed discarded — invalid fetch data was NOT committed." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open PR — MINOR (CI-gated auto-merge enabled)
+        if: steps.diff.outputs.changed == 'true' && steps.classify.outputs.verdict == 'MINOR'
+        id: pr_minor
+        uses: peter-evans/create-pull-request@84ae59a2cdc2258d6fa0732dd66352dddae2a412 # v7.0.9
+        with:
+          commit-message: "chore(quality): sync LMArena quality tiers"
+          branch: chore/quality-sync
+          delete-branch: true
+          title: "chore(quality): weekly quality tier sync [auto-merge]"
+          body: |
+            Automated weekly sync of `src/frugon/data/quality.json` from the
+            [LMArena leaderboard dataset](https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset)
+            (CC-BY-4.0).
+
+            **Verdict: MINOR** — change classified as within expected weekly drift bounds.
+            Auto-merge is enabled; this PR will merge automatically after the CI matrix passes.
+
+            **Reason:** ${{ steps.classify.outputs.reason }}
+          labels: |
+            quality
+            automated
+
+      - name: In-job validation gate (MINOR path)
+        # Run the full quality-data safety gate in-process before enabling
+        # auto-merge.  This is belt-and-braces: gh pr merge --auto only waits
+        # for branch-protection-required checks, and PRs created by the
+        # default GITHUB_TOKEN do not trigger ci.yml on the same repo.
+        # Running linting + type-checking + the quality/classify tests here
+        # gives a synchronous correctness gate before the merge is enabled.
+        #
+        # Operational prerequisites: for auto-merge to be truly CI-gated,
+        # the repository's `main` branch protection must also require the
+        # `CI` matrix status checks.  That is server-side configuration, not
+        # in-repo config — see docs/quality-tiering.md §Operational prerequisites.
+        if: steps.diff.outputs.changed == 'true' && steps.classify.outputs.verdict == 'MINOR' && steps.pr_minor.outputs.pull-request-number != ''
+        run: |
+          uv run ruff check .
+          uv run mypy src
+          uv run pytest tests/test_quality.py tests/test_model_id_drift.py -q
+
+      - name: Enable auto-merge on MINOR PR
+        if: steps.diff.outputs.changed == 'true' && steps.classify.outputs.verdict == 'MINOR' && steps.pr_minor.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr merge "${{ steps.pr_minor.outputs.pull-request-number }}" \
+            --auto \
+            --squash \
+            --repo "${{ github.repository }}"
+
+      - name: Open PR — MAJOR (human review required, auto-merge NOT enabled)
+        if: steps.diff.outputs.changed == 'true' && steps.classify.outputs.verdict == 'MAJOR'
+        uses: peter-evans/create-pull-request@84ae59a2cdc2258d6fa0732dd66352dddae2a412 # v7.0.9
+        with:
+          commit-message: "chore(quality): sync LMArena quality tiers"
+          branch: chore/quality-sync
+          delete-branch: true
+          title: "chore(quality): weekly quality tier sync [needs-review]"
+          body: |
+            Automated weekly sync of `src/frugon/data/quality.json` from the
+            [LMArena leaderboard dataset](https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset)
+            (CC-BY-4.0).
+
+            **Verdict: MAJOR** — the change exceeds expected weekly drift thresholds.
+            **Auto-merge is NOT enabled.** A human must review and merge this PR.
+
+            This may indicate:
+            - A leaderboard rebaseline (scoring mechanism changed)
+            - A significant model count shift (new cohort added / old cohort retired)
+            - A distribution-wide tier rescore
+
+            **Reason:** ${{ steps.classify.outputs.reason }}
+
+            Review the diff carefully before merging. If the change looks correct,
+            merge manually. If it looks wrong, close the PR and investigate.
+          labels: |
+            quality
+            automated
+            needs-review
+
+      - name: No changes — skip PR
+        if: steps.diff.outputs.changed == 'false'
+        run: |
+          echo "## Quality sync: no changes" >> "$GITHUB_STEP_SUMMARY"
+          echo "quality.json is already up to date — no PR opened." >> "$GITHUB_STEP_SUMMARY"
+          echo "quality.json unchanged — no PR opened."

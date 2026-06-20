@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+# Workflow-level write access for the release job to create GitHub Releases.
+# The publish job overrides with id-token: write only (Trusted Publishing).
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Test before release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Install project with dev dependencies
+        run: uv sync --extra dev --extra measure --frozen
+
+      - name: Lint — ruff check
+        run: uv run ruff check .
+
+      - name: Type-check — mypy
+        run: uv run mypy src
+
+      - name: Test — pytest
+        run: uv run pytest
+
+      - name: Test — strict cost coverage
+        run: uv run pytest --cov-config=.coveragerc-strict --cov-fail-under=90
+
+  build:
+    name: Build sdist and wheel
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      # Align the package version with the pushed git tag so the published
+      # wheel/sdist matches the release. Strips a leading "v" from the tag
+      # (v1.2.3 -> 1.2.3) and rewrites the version line in pyproject.toml.
+      - name: Set version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Setting pyproject version to ${VERSION} (from tag ${GITHUB_REF_NAME})"
+          sed -i -E "s/^version = \".*\"/version = \"${VERSION}\"/" pyproject.toml
+          grep -E '^version = ' pyproject.toml
+
+      - name: Build
+        run: uv build
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # required for Trusted Publishing — no API token used
+
+    steps:
+      - name: Download dist artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9a034ebfe128415bbaabdfc # v1.12.4
+
+  release-notes:
+    name: Create GitHub Release
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download dist artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: dist/*
+          generate_release_notes: true

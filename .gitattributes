@@ -1,0 +1,19 @@
+# Line-ending normalization — the LF invariant.
+#
+# Frugon writes capture.jsonl and the Markdown/HTML reports with an explicit
+# newline="\n" so artifacts are byte-identical on Windows, macOS, and Linux.
+# This file extends that guarantee to the repository itself: every text file is
+# stored LF-only and checked out LF-only, so a contributor on a misconfigured
+# clone (core.autocrlf=true) cannot reintroduce CRLF drift into tracked sources,
+# fixtures, or golden test data.
+* text=auto eol=lf
+
+# Binary assets — never normalize or diff as text.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.gz   binary
+*.woff  binary
+*.woff2 binary

@@ -1,0 +1,9 @@
+[run]
+source = src/frugon
+
+[report]
+include =
+    src/frugon/cost.py
+    src/frugon/pricing.py
+    src/frugon/routing.py
+fail_under = 90
