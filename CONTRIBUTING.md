@@ -26,7 +26,7 @@ pip install -e ".[dev]"
 
 ## Running the checks
 
-All three checks must pass before a pull request is merged:
+All checks must pass before a pull request is merged. These mirror the CI workflow (`.github/workflows/ci.yml`):
 
 ```bash
 # Lint
@@ -35,11 +35,15 @@ ruff check .
 # Type check
 mypy src
 
-# Tests with coverage
+# Tests (overall coverage ≥ 80%)
 pytest
+
+# Strict cost-math coverage gate (cost / pricing / routing must stay ≥ 90%)
+pytest --cov-config=.coveragerc-strict --cov-fail-under=90
 ```
 
-The CI matrix runs these on Ubuntu, macOS, and Windows against Python 3.10–3.13.
+CI installs both the `dev` and `measure` extras (`uv sync --extra dev --extra measure --frozen`,
+then `uv run <step>`) and runs every step on Ubuntu, macOS, and Windows against Python 3.10–3.13.
 A PR is not merged until all 12 combinations are green.
 
 ---
@@ -56,9 +60,10 @@ A PR is not merged until all 12 combinations are green.
 
 ## Scope
 
-Frugon is deliberately small, and the scope is locked. It has **two commands** —
-`capture` and `analyze` (plus `pricing update`) — and **three capabilities**:
-cost analysis, quality visibility, and routing recommendation.
+Frugon is deliberately small, and the scope is locked. The user-facing surface is the
+`capture` and `analyze` commands plus the local-table helpers `models`, `pricing update`,
+and `quality update` — delivering **three capabilities**: cost analysis, quality
+visibility, and routing recommendation.
 
 The following are **out of scope** by design: gateway/proxy, live routing,
 web UI, accounts, a database, a marketplace, eval-set management, and support

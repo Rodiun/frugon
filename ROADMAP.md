@@ -110,7 +110,7 @@ local-only method; purely a lookup-robustness improvement.
 ## Report rendering — split the monolith
 
 **Today (the limitation).** All report rendering lives in a single
-`src/frugon/report.py` — roughly 7,700 lines, about 5× the next-largest module.
+`src/frugon/report.py` — roughly 7,800 lines, about 5× the next-largest module.
 One file renders every surface (terminal, Markdown, HTML v1, HTML v2) and holds
 the shared formatting helpers (daggers, footnotes, share bars, candidate and
 swap-plan tables, verdict styling). It is well-tested (~97% line coverage) and

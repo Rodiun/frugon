@@ -26,6 +26,10 @@ Cross-platform: macOS, Linux, Windows · Python 3.10 / 3.11 / 3.12 / 3.13.
 
 **`frugon pricing update`** — refresh the bundled pricing table from the [LiteLLM model_prices_and_context_window.json] registry. Atomic write, JSON shape validation, weekly GitHub Actions sync.
 
+**`frugon models [QUERY]`** — list the model names frugon can price (the exact names `--candidates` accepts), optionally filtered by a case-insensitive substring. Pure local read — no network.
+
+**`frugon quality update`** — refresh the bundled quality-tier table from the LMArena leaderboard so the Strong / Capable tier labels stay current. Tiers are self-recalibrating percentile bands: Elite (top 10%), Strong (10–30%), Capable (30–60%), Efficient (bottom 40%).
+
 **`frugon analyze --measure`** *(optional `[measure]` extra)* — sample real prompts through candidate models using **your own** API keys. Calls go straight to your providers (OpenAI / Anthropic / etc.) — never to us. Two tiers: side-by-side diffs (human judge) or LLM-as-judge win/loss/tie tallies.
 
 **`frugon analyze --report file.html|file.md`** — shareable single-page report. Self-contained HTML with inline CSS (deep indigo + cyan + silver), or clean Markdown. The viral surface someone shows their boss.
@@ -51,9 +55,9 @@ Anchored to [RouteLLM] / [LMSYS] research bands:
 
 ## Quality
 
-- 209 tests, 88% overall coverage, >90% on the cost-math triad (`cost.py` / `pricing.py` / `routing.py`).
+- 1,960 tests, 95% overall coverage, 97% on the cost-math triad (`cost.py` / `pricing.py` / `routing.py`).
 - CI green on 3 OS × 4 Python (ubuntu / macos / windows × 3.10 / 3.11 / 3.12 / 3.13).
-- All commits reviewer-Opus gated; cost-math changes get an extra `§2a` Opus pass.
+- Every change is code-reviewed before merge; cost-math changes get an extra dedicated review pass.
 - ruff + mypy clean.
 
 ## Keep the savings
