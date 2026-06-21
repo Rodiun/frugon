@@ -5,7 +5,7 @@
 Free, local, open-source LLM cost analyzer. Point Frugon at your LLM call logs
 and see — on your machine — how much you'd save by switching or routing models.
 
-[![PyPI](https://img.shields.io/pypi/v/frugon.svg)](https://pypi.org/project/frugon/)
+[![PyPI](https://img.shields.io/pypi/v/frugon.svg?cacheSeconds=3600)](https://pypi.org/project/frugon/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![CI](https://github.com/Rodiun/frugon/actions/workflows/ci.yml/badge.svg)](https://github.com/Rodiun/frugon/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10%20%E2%80%93%203.13-blue.svg)](https://github.com/Rodiun/frugon)
