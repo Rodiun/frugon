@@ -1,0 +1,42 @@
+name: Bug report
+description: Something in frugon didn't work as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug.
+
+        ⚠️ **Frugon is local-first — please keep your report local-first too.** Don't paste real
+        prompts, completions, API keys, or raw log contents. Redact them or use a minimal synthetic
+        example that still reproduces the problem.
+  - type: input
+    id: version
+    attributes:
+      label: frugon version
+      description: Output of `frugon --version`.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: OS and Python version
+      placeholder: "macOS 14 · Python 3.12"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you run, what did you expect, and what did you get instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: A minimal command plus a redacted or synthetic input that triggers it.
+      render: shell
+    validations:
+      required: false

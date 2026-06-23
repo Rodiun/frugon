@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Rodiun/frugon/security/policy
+    about: Please don't open a public issue for security problems — follow the security policy.
+  - name: Frugon website
+    url: https://frugon.rodiun.io
+    about: Install, docs, and what frugon does.

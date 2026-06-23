@@ -1,0 +1,31 @@
+name: Feature request
+description: Suggest an improvement to frugon
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Frugon is deliberately small — cost analysis, quality visibility, and routing
+        recommendation, run locally with nothing sent anywhere. Requests that keep it sharp,
+        honest, and local-first are the most likely to land.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What friction are you hitting? What are you trying to find out about your LLM spend?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like frugon to do?
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Anything you've tried or considered instead.
+    validations:
+      required: false
