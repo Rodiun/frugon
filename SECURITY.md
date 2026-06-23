@@ -9,7 +9,7 @@ The smallest attack surface is the one that never collects your data.
 Please **do not** open a public issue for security problems. Report privately:
 
 - **Preferred:** GitHub's **"Report a vulnerability"** button (this repo → **Security** tab → private advisory).
-- **Email:** security@rodiun.io  (backup: rodson@rodiun.io)
+- **Email:** security@rodiun.io
 
 Include the affected version, a description, steps to reproduce, and any suggested fix.
 You'll get an acknowledgment within **48 hours** and a triage response within **7 days**. We credit
