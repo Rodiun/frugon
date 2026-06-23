@@ -99,14 +99,33 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Check out repository (for the curated release-notes file)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
       - name: Download dist artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: dist
           path: dist/
 
+      # Prefer the curated, hand-written notes at .github/RELEASE_NOTES_<tag>.md
+      # (e.g. .github/RELEASE_NOTES_v0.1.0.md) when present; otherwise fall back to
+      # auto-generated notes. body_path="" is treated as unset by action-gh-release.
+      - name: Resolve curated release notes (per-tag, optional)
+        id: notes
+        run: |
+          NOTES=".github/RELEASE_NOTES_${GITHUB_REF_NAME}.md"
+          if [ -f "$NOTES" ]; then
+            echo "Using curated notes: $NOTES"
+            echo "path=$NOTES" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No curated notes at $NOTES — falling back to auto-generated notes."
+            echo "path=" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: dist/*
+          body_path: ${{ steps.notes.outputs.path }}
           generate_release_notes: true
