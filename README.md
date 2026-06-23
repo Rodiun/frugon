@@ -150,7 +150,7 @@ every model, locally, and tells you which calls to move and which to keep.
 
 ## Realistic savings
 
-Based on [RouteLLM / LMSYS](https://github.com/lm-sys/RouteLLM) research:
+Based on [RouteLLM](https://github.com/lm-sys/RouteLLM)'s published research (LMSYS):
 
 | Traffic mix | Typical saving |
 |---|---|

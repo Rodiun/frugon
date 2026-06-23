@@ -784,7 +784,7 @@ class TestSplitReportBrandPolish:
         # The full provenance string is one <p class="meta"> element (one row).
         provenance = (
             "methodology &middot; tokencost &middot; LiteLLM registry "
-            "&middot; LMArena quality tiers, RouteLLM/LMSYS-style routing &middot; "
+            "&middot; LMArena quality tiers, RouteLLM-style routing &middot; "
             "0 LLM calls made for this analysis"
         )
         assert f'<p class="meta">{provenance}</p>' in html

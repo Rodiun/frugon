@@ -5018,7 +5018,7 @@ def _render_markdown_split(
         f"_{_methodology_note_text(measure_result)}_",
         "",
         "_methodology · tokencost · LiteLLM registry · "
-        f"LMArena quality tiers, RouteLLM/LMSYS-style routing · {_methodology_tail_text(measure_result)}_",
+        f"LMArena quality tiers, RouteLLM-style routing · {_methodology_tail_text(measure_result)}_",
         "",
     ]
     output_path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
@@ -5478,7 +5478,7 @@ def render_markdown_v2(
         f"_{_methodology_note_text(measure_result)}_",
         "",
         "_methodology · tokencost · LiteLLM registry · "
-        f"LMArena quality tiers, RouteLLM/LMSYS-style routing · {_methodology_tail_text(measure_result)}_",
+        f"LMArena quality tiers, RouteLLM-style routing · {_methodology_tail_text(measure_result)}_",
         "",
     ]
 
@@ -7251,7 +7251,7 @@ def _render_html_v2_split_body(
     foot += [
         f'<p class="privacy">{_privacy_html(measure_result)}</p>',
         '<p class="meta">methodology &middot; tokencost &middot; LiteLLM registry '
-        f"&middot; LMArena quality tiers, RouteLLM/LMSYS-style routing &middot; {esc(_methodology_tail_text(measure_result))}</p>",
+        f"&middot; LMArena quality tiers, RouteLLM-style routing &middot; {esc(_methodology_tail_text(measure_result))}</p>",
         '<p class="cta">'
         + esc(FUNNEL_LINE).replace(
             esc("→ https://frugon.rodiun.io"),
@@ -7742,7 +7742,7 @@ def render_html_v2(
     foot.append(f'<p class="privacy">{_privacy_html(measure_result)}</p>')
     foot.append(
         '<p class="meta">methodology &middot; tokencost &middot; LiteLLM registry '
-        f"&middot; LMArena quality tiers, RouteLLM/LMSYS-style routing &middot; {esc(_methodology_tail_text(measure_result))}</p>"
+        f"&middot; LMArena quality tiers, RouteLLM-style routing &middot; {esc(_methodology_tail_text(measure_result))}</p>"
     )
     if result.candidate_model:
         foot.append(
