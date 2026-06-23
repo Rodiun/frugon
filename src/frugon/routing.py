@@ -6,7 +6,7 @@ candidate while keeping the hard calls on the premium baseline.  The result is a
 routed/kept split with a blended cost and an honest blended saving — the shape a
 prospect sees on the landing page (``N routed -> mini, M kept -> premium, -X%``).
 
-Method (RouteLLM / LMSYS-style, but local and heuristic)
+Method (RouteLLM-style, but local and heuristic)
 --------------------------------------------------------
 RouteLLM (https://github.com/lm-sys/RouteLLM, lmsys) trains routers on human
 preference data to decide *when a strong model is actually needed*; easy queries

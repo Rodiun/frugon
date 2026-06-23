@@ -109,7 +109,7 @@ PRIVACY_LINE = (
 # Record count above which analyze prints a one-line "this may take a moment"
 # heads-up on the stderr progress channel.  Not a cap and not a hard limit — just
 # a courtesy.  Sized well above the comfortable range: analysis is fast to ~100k
-# records and the 50k bundled demo prices in a couple of seconds, so the notice
+# records and the ~56k bundled demo prices in a few seconds, so the notice
 # only fires for genuinely large logs where a short wait is expected.
 _LARGE_LOG_NOTICE_THRESHOLD = 200_000
 
@@ -777,7 +777,7 @@ def analyze(
       frugon analyze --demo
 
     Scale: analysis runs entirely on your machine and is comfortable well past
-    100k records — the bundled 50k-record demo prices in a couple of seconds.
+    100k records — the bundled ~56,100-record demo prices in a few seconds.
     Very large logs (>200k records) may take a little longer; frugon prints a
     one-line heads-up and a live progress bar so you can see it working. There is
     no hard limit.

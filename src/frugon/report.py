@@ -206,7 +206,7 @@ FUNNEL_URL = "https://frugon.rodiun.io"
 # transparent offline heuristic, not a trained router or a quality guarantee.
 SPLIT_CAVEAT = (
     "Easy/hard split is a local heuristic over prompt and completion length "
-    "(RouteLLM/LMSYS-style), computed offline with no LLM calls. "
+    "(RouteLLM-style), computed offline with no LLM calls. "
     "Quality is not verified — run --measure to sample real outputs before you switch."
 )
 # Variant for the case where tier_drop <= 0 (same or better quality): the method
@@ -214,7 +214,7 @@ SPLIT_CAVEAT = (
 # with the accurate positive statement.  Used in the Markdown/HTML taglines.
 SPLIT_CAVEAT_EQUAL_OR_BETTER = (
     "Easy/hard split is a local heuristic over prompt and completion length "
-    "(RouteLLM/LMSYS-style), computed offline with no LLM calls. "
+    "(RouteLLM-style), computed offline with no LLM calls. "
     "Candidate is rated same or better quality — no quality downgrade."
 )
 
@@ -1779,7 +1779,7 @@ def _render_split_verbose(result: AnalysisResult, split: SplitRouting) -> None:
     _print_hanging(
         Text(
             "easy/hard is a local heuristic over prompt and completion length "
-            "(RouteLLM/LMSYS-style), computed offline with no LLM calls",
+            "(RouteLLM-style), computed offline with no LLM calls",
             style="dim",
         ),
         hang=_LABEL_HANG,

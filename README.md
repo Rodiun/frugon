@@ -101,7 +101,7 @@ frugon analyze ./logs.jsonl     # see the cost breakdown and routing recommendat
 - **Routing recommendation** — "move these X% of calls to a cheaper model and save ~$Y/mo; keep the hard Z% where they are." Comes with an explicit quality caveat so you know what you're trading.
   Run `frugon models` to see the model names available for `--candidates` (optionally `frugon models gpt-4o` to filter by substring).
 - **Share the result** — add `--report savings.html` (or `.md`) to write a clean, shareable report you can drop into a PR, a Slack thread, or a budget review.
-- **Fast on real logs** — everything runs locally and is comfortable well past 100k records. The bundled ~56,100-call demo (`frugon analyze --demo`) prices in a couple of seconds. Very large logs (>200k records) may take a little longer; Frugon shows a live progress bar and a one-line heads-up so you can see it working. There's no hard limit.
+- **Fast on real logs** — everything runs locally and is comfortable well past 100k records. The bundled ~56,100-call demo (`frugon analyze --demo`) prices in a few seconds. Very large logs (>200k records) may take a little longer; Frugon shows a live progress bar and a one-line heads-up so you can see it working. There's no hard limit.
 
 ## Example output
 
