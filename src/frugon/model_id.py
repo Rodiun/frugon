@@ -45,6 +45,7 @@ _PREFIXES: tuple[str, ...] = (
     "mistral/",
     "cohere/",
     "deepseek/",
+    "xai/",
     "gemini/",
     "google/",
 )

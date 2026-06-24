@@ -170,8 +170,11 @@ def clear_pricing_cache() -> None:
     changing).  Production callers never need this — the mtime/size cache key
     already invalidates on a real ``frugon pricing update``.
     """
+    global _canonical_tc_index, _canonical_tc_token
     _override_cache.clear()
     _resolve_model_price.cache_clear()
+    _canonical_tc_index = None
+    _canonical_tc_token = None
 
 
 def load_pricing_override() -> _OverrideTable:
@@ -218,6 +221,38 @@ def load_pricing_override() -> _OverrideTable:
     _override_cache.clear()
     _override_cache[key] = result
     return result
+
+
+def _price_pair(entry: object) -> tuple[Decimal, Decimal] | None:
+    """Extract a valid (input, output) per-token price pair from a registry entry.
+
+    Returns None when *entry* is not a dict, or when either cost field is absent
+    or None.  Centralises the "is this entry priceable, and what is the pair?"
+    decision so every lookup path (override, exact tokencost, newest-dated, the
+    canonical bridge) handles missing/null costs identically — fail-safe to None
+    rather than crashing on ``Decimal(str(None))`` or a missing key.
+    """
+    if not isinstance(entry, dict):
+        return None
+    in_cost = entry.get("input_cost_per_token")
+    out_cost = entry.get("output_cost_per_token")
+    if in_cost is None or out_cost is None:
+        return None
+    return (Decimal(str(in_cost)), Decimal(str(out_cost)))
+
+
+def _agreed_pair(
+    pairs: set[tuple[Decimal, Decimal]],
+) -> tuple[Decimal, Decimal] | None:
+    """The single agreed (input, output) price pair from *pairs*, else None.
+
+    Returns the pair when the set holds exactly one distinct (input, output)
+    tuple; returns None when the set is empty or holds two or more (divergent).
+    This is the §2a "never guess on divergence" gate, centralised so every caller
+    — the newest-dated fallback and the canonical bridge index — refuses divergent
+    prices identically; a fix to one gate cannot silently miss the other.
+    """
+    return next(iter(pairs)) if len(pairs) == 1 else None
 
 
 # ---------------------------------------------------------------------------
@@ -269,72 +304,152 @@ def _newest_dated_tokencost_price(
             # Suffix is not an 8-digit compact date — skip (could be a suffix like
             # "-latest" or another name that starts with the same prefix).
             continue
-        in_cost = entry.get("input_cost_per_token")
-        out_cost = entry.get("output_cost_per_token")
-        if in_cost is None or out_cost is None:
+        pair = _price_pair(entry)
+        if pair is None:
             return None  # any dated variant missing cost → fail safe
-        dated.append((key, Decimal(str(in_cost)), Decimal(str(out_cost))))
+        dated.append((key, pair[0], pair[1]))
 
     if not dated:
         return None
 
-    # Verify all dated variants share the same price (consistency check).
-    input_prices = {row[1] for row in dated}
-    output_prices = {row[2] for row in dated}
-    if len(input_prices) != 1 or len(output_prices) != 1:
-        # Price inconsistency across dated variants — provider changed rate.
-        # Cannot safely attribute a single price to the bare name.
+    # Consistency gate: every dated variant must share one (input, output) pair.
+    # A mismatch means the provider changed their rate across snapshot dates and we
+    # cannot safely attribute a single price to the bare name → refuse (None).
+    agreed = _agreed_pair({(row[1], row[2]) for row in dated})
+    if agreed is None:
         return None
 
     # Pick the newest: compact dates sort lexicographically (YYYYMMDD).
     newest_key = max(dated, key=lambda row: row[0])[0]
-    in_c, out_c = input_prices.pop(), output_prices.pop()
     return ModelPrice(
         model=model,
-        input_cost_per_token=in_c,
-        output_cost_per_token=out_c,
+        input_cost_per_token=agreed[0],
+        output_cost_per_token=agreed[1],
         source=f"tokencost[{newest_key}]",
         pricing_json_last_synced=last_synced,
     )
 
 
+# ---------------------------------------------------------------------------
+# Canonicalized-tokencost bridge
+# ---------------------------------------------------------------------------
+#
+# tokencost stores most models under provider-prefixed keys (e.g.
+# "deepseek/deepseek-r1", "mistral/mistral-large-latest", "vertex_ai/...").  The
+# exact/canonical steps look a user's canonicalized name up against tokencost's
+# RAW keys, so a bare wire form ("deepseek-r1") misses the prefixed key even
+# though tokencost carries the price.
+#
+# The bridge indexes tokencost BY canonical form: canonicalize(raw_key) -> price.
+# Consistency gate (§2a — never fabricate a number): a canonical name that
+# several raw keys map to is included ONLY when every contributing key agrees on
+# the (input, output) price pair; a name with divergent prices across providers
+# maps to None so the lookup refuses to guess.  Built once per process
+# (tokencost is static); reset by clear_pricing_cache() for tests that swap the
+# registry out via monkeypatching.
+
+_canonical_tc_index: dict[str, tuple[Decimal, Decimal] | None] | None = None
+# Identity token (id, len) of the tokencost table the index was built from.  When
+# it changes — e.g. a test swaps tokencost.TOKEN_COSTS for a different-length dict —
+# the index rebuilds on next use.  In production TOKEN_COSTS is never reassigned, so
+# the token is constant and this path is dead.  A test that mutates the SAME table
+# object in place without changing its length must still call clear_pricing_cache().
+_canonical_tc_token: tuple[int, int] | None = None
+
+
+def _build_canonical_tokencost_index(
+    tc_costs: dict[str, dict[str, object]],
+) -> dict[str, tuple[Decimal, Decimal] | None]:
+    """Map ``canonicalize(tokencost_key)`` to its (input, output) price pair.
+
+    When several raw keys share a canonical form, the entry is the agreed price
+    iff every contributing key carries the same pair; otherwise the entry is
+    None (divergent → refuse to guess).  Keys missing either cost field are
+    skipped (they cannot price a request anyway).
+    """
+    from collections import defaultdict
+
+    groups: dict[str, set[tuple[Decimal, Decimal]]] = defaultdict(set)
+    for key, entry in tc_costs.items():
+        pair = _price_pair(entry)
+        if pair is None:
+            continue
+        groups[canonicalize(key)].add(pair)
+
+    index: dict[str, tuple[Decimal, Decimal] | None] = {}
+    for canon, pairs in groups.items():
+        index[canon] = _agreed_pair(pairs)
+    return index
+
+
+def _canonical_tokencost_price(
+    name: str,
+    model: str,
+    tc_costs: dict[str, dict[str, object]],
+    last_synced: str | None,
+) -> ModelPrice | None:
+    """Resolve *name* via the consistency-gated canonicalized-tokencost index."""
+    global _canonical_tc_index, _canonical_tc_token
+    token = (id(tc_costs), len(tc_costs))
+    if _canonical_tc_index is None or _canonical_tc_token != token:
+        _canonical_tc_index = _build_canonical_tokencost_index(tc_costs)
+        _canonical_tc_token = token
+    pair = _canonical_tc_index.get(name)
+    if pair is None:
+        return None
+    return ModelPrice(
+        model=model,
+        input_cost_per_token=pair[0],
+        output_cost_per_token=pair[1],
+        source="tokencost[canonical]",
+        pricing_json_last_synced=last_synced,
+    )
+
+
 @functools.lru_cache(maxsize=4096)
-def _resolve_model_price(model: str, _cache_key: _CacheKey) -> ModelPrice | None:
+def _resolve_model_price(
+    model: str, _cache_key: _CacheKey, _tc_token: tuple[int, int]
+) -> ModelPrice | None:
     """Resolve and cache the price for *model* under a pricing-table identity.
 
     The ``_cache_key`` argument is the override table's identity (path + mtime +
     size, from :func:`_override_cache_key`).  It is part of the cache key so a
     ``frugon pricing update`` (which changes the file's mtime/size) transparently
     invalidates every memoized model — without it a long-lived process could
-    return prices from a superseded table.  The same key value is reused for
-    every record in one analysis run, so each distinct model is resolved exactly
-    once even across tens of thousands of calls.
+    return prices from a superseded table.
+
+    ``_tc_token`` is the tokencost registry's identity ``(id, len)``.  It is part
+    of the cache key purely so that swapping ``tokencost.TOKEN_COSTS`` (which tests
+    do via monkeypatch) invalidates the memo without depending on a
+    ``clear_pricing_cache()`` call; in production the registry is static so this
+    token never changes.  Both extra args are cache-key-only (unused in the body).
+
+    The same key values are reused for every record in one analysis run, so each
+    distinct model is resolved exactly once even across tens of thousands of calls.
     """
     override_table, last_synced = load_pricing_override()
     tc_costs: dict[str, dict[str, object]] = _tc.TOKEN_COSTS  # type: ignore[attr-defined]
 
     def _from_override(name: str) -> ModelPrice | None:
-        if name not in override_table:
+        pair = _price_pair(override_table.get(name))
+        if pair is None:
             return None
-        entry = override_table[name]
         return ModelPrice(
             model=model,
-            input_cost_per_token=Decimal(str(entry["input_cost_per_token"])),
-            output_cost_per_token=Decimal(str(entry["output_cost_per_token"])),
+            input_cost_per_token=pair[0],
+            output_cost_per_token=pair[1],
             source="pricing.json",
             pricing_json_last_synced=last_synced,
         )
 
     def _from_tokencost(name: str) -> ModelPrice | None:
-        if name not in tc_costs:
-            return None
-        entry = tc_costs[name]
-        if "input_cost_per_token" not in entry or "output_cost_per_token" not in entry:
+        pair = _price_pair(tc_costs.get(name))
+        if pair is None:
             return None
         return ModelPrice(
             model=model,
-            input_cost_per_token=Decimal(str(entry["input_cost_per_token"])),
-            output_cost_per_token=Decimal(str(entry["output_cost_per_token"])),
+            input_cost_per_token=pair[0],
+            output_cost_per_token=pair[1],
             source="tokencost",
             pricing_json_last_synced=last_synced,
         )
@@ -361,21 +476,44 @@ def _resolve_model_price(model: str, _cache_key: _CacheKey) -> ModelPrice | None
         if result is not None:
             return result
 
-    # 4. Newest-dated tokencost fallback: when canon == base (no date suffix to
-    #    strip) and all three steps above missed, probe tokencost for consistently-
-    #    priced compact-dated variants of the base family.
+    # 4. Newest-dated tokencost fallback — ONLY for a genuinely bare family name
+    #    (canon == base, i.e. no date / "-latest" / tag suffix was stripped).
+    #    Probes tokencost for consistently-priced compact-dated variants of the
+    #    family and attributes the newest to the bare name.  This resolves bare
+    #    Anthropic families (e.g. "claude-3-5-sonnet") that tokencost only carries
+    #    under dated keys (e.g. "claude-3-5-sonnet-20241022"); the consistency gate
+    #    refuses when the list rate changed across snapshot dates.
     #
-    #    This resolves bare Anthropic family names (e.g. "claude-3-5-sonnet",
-    #    "claude-3-opus") that tokencost only carries under dated keys
-    #    (e.g. "claude-3-5-sonnet-20241022").  The consistency gate ensures we
-    #    never fabricate a price when Anthropic has changed their list rate across
-    #    snapshot dates.
+    #    The `canon == base` guard is load-bearing, not cosmetic: without it a
+    #    suffixed name like "foo-latest" (canon "foo-latest", base "foo") whose own
+    #    `-latest` price is DIVERGENT across providers would be re-priced here from
+    #    the consistent "foo" dated family — the identical §2a fabrication the
+    #    step-5 gate refuses, one step earlier (see
+    #    test_divergent_latest_does_not_fall_through_to_newest_dated).  A suffixed
+    #    name is instead routed to the canon-gated step 5, which prices it iff the
+    #    name's own canonical form is consistent and refuses it otherwise.
+    if canon == base:
+        result = _newest_dated_tokencost_price(base, model, tc_costs, last_synced)
+        if result is not None:
+            return result
+
+    # 5. Canonicalized-tokencost bridge (last resort, after override + exact +
+    #    canonical + base + newest-dated all missed): tokencost stores most models
+    #    under provider-prefixed keys (e.g. "deepseek/deepseek-r1"); the index maps
+    #    canonicalize(raw_key) -> price so a bare wire name matches.  Purely
+    #    additive — never overrides an earlier resolution.
     #
-    #    We use the base derived above (which equals canon when no suffix was
-    #    stripped) as the family prefix.  If canon had a date stripped (base !=
-    #    canon), the dated variant would already have been found in step 2 or 3;
-    #    this step is a no-op in that case.
-    result = _newest_dated_tokencost_price(base, model, tc_costs, last_synced)
+    #    CANON-ONLY — deliberately NO base-family arm.  Folding to base_family here
+    #    would evaluate the consistency gate over a broader set of raw keys than the
+    #    one that prices the requested name, letting a base-family price be
+    #    attributed to a `-latest`/dated name the gate already refused as divergent
+    #    (a fabricated number — see test_divergent_latest_does_not_fall_through_to_base).
+    #    Legitimate bare-family coverage already resolves through this canon step
+    #    (canonicalize("mistral-large") == "mistral-large" is itself a clean index
+    #    key); provider-qualified names (e.g. "mistral/mistral-large-latest") resolve
+    #    via the exact step above.  Consistency-gated: a canonical name priced
+    #    divergently across providers resolves to None rather than guessing.
+    result = _canonical_tokencost_price(canon, model, tc_costs, last_synced)
     if result is not None:
         return result
 
@@ -445,7 +583,8 @@ def get_model_price(model: str) -> ModelPrice | None:
     model name only once per run.  The memo invalidates automatically when the
     pricing file is rewritten (its mtime/size change the cache key).
     """
-    return _resolve_model_price(model, _override_cache_key())
+    tc_token = (id(_tc.TOKEN_COSTS), len(_tc.TOKEN_COSTS))  # type: ignore[attr-defined]
+    return _resolve_model_price(model, _override_cache_key(), tc_token)
 
 
 def is_model_known(model: str) -> bool:
