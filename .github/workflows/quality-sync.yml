@@ -27,7 +27,7 @@ jobs:
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
 
       - name: Install project
-        run: uv sync
+        run: uv sync --extra dev --extra measure --frozen
 
       - name: Capture old quality.json (pre-fetch baseline)
         id: old_seed
@@ -141,7 +141,7 @@ jobs:
       - name: Open PR — MINOR (CI-gated auto-merge enabled)
         if: steps.diff.outputs.changed == 'true' && steps.classify.outputs.verdict == 'MINOR'
         id: pr_minor
-        uses: peter-evans/create-pull-request@84ae59a2cdc2258d6fa0732dd66352dddae2a412 # v7.0.9
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           commit-message: "chore(quality): sync LMArena quality tiers"
           branch: chore/quality-sync
@@ -190,7 +190,7 @@ jobs:
 
       - name: Open PR — MAJOR (human review required, auto-merge NOT enabled)
         if: steps.diff.outputs.changed == 'true' && steps.classify.outputs.verdict == 'MAJOR'
-        uses: peter-evans/create-pull-request@84ae59a2cdc2258d6fa0732dd66352dddae2a412 # v7.0.9
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           commit-message: "chore(quality): sync LMArena quality tiers"
           branch: chore/quality-sync
