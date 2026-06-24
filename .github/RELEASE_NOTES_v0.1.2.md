@@ -8,7 +8,7 @@ A patch release. The headline fix: `frugon --version` now reports the correct ve
 
 ## Housekeeping
 
-- **Refreshed the bundled pricing and quality data.** The out-of-the-box pricing table now covers the full [LiteLLM](https://github.com/BerriAI/litellm) registry, and the quality tiers reflect the latest LMArena snapshot. You can refresh these yourself any time with `frugon pricing update` / `frugon quality update` — this just improves the defaults you get on a fresh install.
+- **Refreshed the bundled quality tiers** to the latest LMArena snapshot. You can refresh these yourself any time with `frugon quality update` — this just improves the defaults you get on a fresh install.
 - Internal CI maintenance (GitHub Action runtime bumps; data-sync workflow fix).
 
 ## Install / upgrade
