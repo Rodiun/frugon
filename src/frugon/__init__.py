@@ -1,6 +1,15 @@
 """frugon — free, local, open-source LLM cost analyzer."""
 
-__version__ = "0.1.0"
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
+
+try:
+    # Single source of truth: the installed package metadata (from pyproject).
+    # NEVER hardcode the version here — a literal drifts from pyproject on every
+    # bump (it shipped 0.1.1 reporting "0.1.0" exactly because it was hardcoded).
+    __version__ = _pkg_version("frugon")
+except PackageNotFoundError:  # running from a source tree with no install
+    __version__ = "0.0.0+dev"
 
 # Sent on every outbound registry / leaderboard fetch (pricing + quality
 # refresh). Some hosts — notably the Hugging Face datasets-server backing the
