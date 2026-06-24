@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Pre-push gate: run the full local CI suite and BLOCK the push if it fails.
+# This is what keeps origin (and the public CI badge) green.
+#
+# Enable once per clone:   git config core.hooksPath .githooks
+# Bypass only for genuine emergencies (e.g. a docs-only push):
+#                          git push --no-verify
+set -euo pipefail
+
+echo "── pre-push: running local CI gate (mirrors ci.yml) ──"
+"$(git rev-parse --show-toplevel)/scripts/ci-local.sh"
+echo "── pre-push: gate green, allowing push ──"
