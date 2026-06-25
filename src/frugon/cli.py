@@ -520,6 +520,17 @@ def capture(
         ),
         show_default=False,
     ),
+    proxy: str | None = typer.Option(  # noqa: B008
+        None,
+        "--proxy",
+        help=(
+            "Route upstream calls through this proxy URL (e.g. http://127.0.0.1:8080). "
+            "By default frugon sends requests straight to your provider and ignores any "
+            "HTTP_PROXY/HTTPS_PROXY environment, so your API key never passes through a "
+            "third-party proxy. Set this only to opt in knowingly."
+        ),
+        show_default=False,
+    ),
 ) -> None:
     """Start the local passive logger.
 
@@ -553,7 +564,14 @@ def capture(
         )
     )
 
-    run_capture(port=port, out_path=out, upstream=upstream, verbosity=verbosity, allow_insecure_upstream=allow_insecure)
+    run_capture(
+        port=port,
+        out_path=out,
+        upstream=upstream,
+        verbosity=verbosity,
+        allow_insecure_upstream=allow_insecure,
+        proxy=proxy,
+    )
 
 
 # ---------------------------------------------------------------------------

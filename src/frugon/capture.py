@@ -111,17 +111,36 @@ class _CredentialStrippingRedirectHandler(urllib.request.HTTPRedirectHandler):
         return new_req
 
 
-def _build_restricted_opener() -> urllib.request.OpenerDirector:
+def _build_restricted_opener(proxy: str | None = None) -> urllib.request.OpenerDirector:
     """Return an OpenerDirector that handles ONLY http:// and https://.
 
     Unlike urllib.request.build_opener(), this does NOT register the default
     FileHandler / FTPHandler / DataHandler. Any non-HTTP scheme falls through
     to UnknownHandler, which raises URLError('unknown url type: <scheme>').
     Defence-in-depth below _validate_upstream.
+
+    Proxy policy (privacy invariant): by default NO proxy is used. An empty
+    ``ProxyHandler({})`` deliberately ignores the ambient ``HTTP_PROXY`` /
+    ``HTTPS_PROXY`` environment, so the developer's request — and its
+    ``Authorization`` header — goes straight to their own provider, never
+    silently through a third-party proxy. Pass an explicit *proxy* URL (the
+    ``--proxy`` flag) to opt in to routing through it knowingly.
     """
+    proxies: dict[str, str] = {}
+    if proxy:
+        # Mirror _validate_upstream's scheme allowlist: an explicit proxy must be
+        # http(s):// (urllib cannot route SOCKS/file/etc. anyway). Reject up front
+        # with a clear message instead of failing deep inside urllib later.
+        scheme = urllib.parse.urlsplit(proxy).scheme.lower()
+        if scheme not in ("http", "https"):
+            raise ValueError(
+                f"proxy scheme {scheme or '(empty)'!r} is not allowed; "
+                "use an http:// or https:// proxy URL"
+            )
+        proxies = {"http": proxy, "https": proxy}
     opener = urllib.request.OpenerDirector()
     for handler in (
-        urllib.request.ProxyHandler(),
+        urllib.request.ProxyHandler(proxies),
         urllib.request.HTTPHandler(),
         urllib.request.HTTPSHandler(),
         urllib.request.HTTPDefaultErrorHandler(),
@@ -401,6 +420,7 @@ class CaptureServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         verbosity: str = "normal",
         allow_insecure_upstream: bool = False,
         upstream_timeout: float | None = _DEFAULT_UPSTREAM_TIMEOUT,
+        proxy: str | None = None,
     ) -> None:
         _validate_upstream(upstream, allow_insecure_upstream=allow_insecure_upstream)
         # Validate output path writability before binding the port so errors
@@ -414,7 +434,7 @@ class CaptureServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.out_path = out_path
         self.upstream = upstream
         self._upstream_timeout = upstream_timeout
-        self._opener: urllib.request.OpenerDirector = _build_restricted_opener()
+        self._opener: urllib.request.OpenerDirector = _build_restricted_opener(proxy)
         self.feedback = _FeedbackStream(verbosity)
         # newline="" disables universal-newline translation so the literal
         # "\n" written below reaches disk unchanged on every OS (no \r\n on
@@ -447,6 +467,7 @@ def run_capture(
     verbosity: str = "normal",
     allow_insecure_upstream: bool = False,
     upstream_timeout: float | None = _DEFAULT_UPSTREAM_TIMEOUT,
+    proxy: str | None = None,
 ) -> None:
     """Start the capture server and block until interrupted (Ctrl+C).
 
@@ -476,6 +497,11 @@ def run_capture(
         are cut at this deadline and the caller receives a 504. Pass ``None``
         to disable the timeout (not recommended). Note: ``0`` means
         non-blocking (instant fail), not disabled. Default: 60 s.
+    proxy:
+        Optional proxy URL to route upstream calls through. By default no proxy
+        is used and the ambient HTTP(S)_PROXY environment is ignored, so the
+        user's API key goes straight to their provider — never through a third
+        party. Set this to opt in to a proxy knowingly.
     """
     if upstream is None:
         upstream = os.environ.get("OPENAI_BASE_URL", _DEFAULT_UPSTREAM)
@@ -488,6 +514,7 @@ def run_capture(
             verbosity=verbosity,
             allow_insecure_upstream=allow_insecure_upstream,
             upstream_timeout=upstream_timeout,
+            proxy=proxy,
         )
     except (ValueError, OSError) as exc:
         sys.stderr.write(f"error: {exc}\n")

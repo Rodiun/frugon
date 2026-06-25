@@ -1335,6 +1335,116 @@ def test_restricted_opener_blocks_data_scheme() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Proxy policy — privacy invariant: ignore ambient HTTP(S)_PROXY (FRG-OSS-016)
+# ---------------------------------------------------------------------------
+
+
+def test_restricted_opener_ignores_ambient_proxy_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Arrange: HTTP_PROXY / HTTPS_PROXY / ALL_PROXY set in the environment.
+    Act: _build_restricted_opener() with no explicit proxy.
+    Assert: the ProxyHandler carries NO proxies — the ambient env is ignored, so
+            the developer's request (and its Authorization header) is never routed
+            through a third-party proxy (privacy invariant, FRG-OSS-016).
+
+    Fails-before / passes-after: the previous ``ProxyHandler()`` (no args) would
+    pick up these env vars, so .proxies would be non-empty.
+    """
+    import urllib.request
+
+    monkeypatch.setenv("HTTP_PROXY", "http://evil.proxy.example:8080")
+    monkeypatch.setenv("HTTPS_PROXY", "http://evil.proxy.example:8080")
+    monkeypatch.setenv("ALL_PROXY", "http://evil.proxy.example:8080")
+
+    opener = _build_restricted_opener()
+    proxy_handlers = [
+        h for h in opener.handlers if isinstance(h, urllib.request.ProxyHandler)
+    ]
+    # An empty ProxyHandler({}) registers no <proto>_open methods, so urllib's
+    # add_handler does not even add it to opener.handlers — without a registered
+    # ProxyHandler, connections go direct. The invariant either way: no registered
+    # ProxyHandler carries a proxy derived from the ambient environment. (Old code
+    # used ProxyHandler() which WOULD pick up HTTP_PROXY and register a non-empty
+    # proxy handler here — so this fails-before / passes-after.)
+    assert all(not h.proxies for h in proxy_handlers), (
+        "the ambient HTTP(S)_PROXY environment leaked into the capture opener: "
+        f"{[h.proxies for h in proxy_handlers]} — the key must go straight to the provider"
+    )
+
+
+def test_restricted_opener_uses_explicit_proxy_when_given() -> None:
+    """Arrange: an explicit proxy URL (the --proxy opt-in).
+    Act: _build_restricted_opener(proxy=...).
+    Assert: the ProxyHandler routes http + https through exactly that proxy — an
+            informed, explicit opt-in (FRG-OSS-016).
+    """
+    import urllib.request
+
+    proxy = "http://127.0.0.1:8080"
+    opener = _build_restricted_opener(proxy)
+    proxy_handlers = [
+        h for h in opener.handlers if isinstance(h, urllib.request.ProxyHandler)
+    ]
+    assert proxy_handlers, "opener must register a ProxyHandler"
+    assert proxy_handlers[0].proxies == {"http": proxy, "https": proxy}
+
+
+def test_capture_cli_threads_proxy_to_run_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Arrange: mock run_capture to record its kwargs.
+    Act: invoke ``frugon capture --proxy <url>``.
+    Assert: the proxy value is threaded CLI -> run_capture (wiring for FRG-OSS-016).
+    """
+    captured: dict[str, Any] = {}
+
+    def _fake_run_capture(**kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(capture_mod, "run_capture", _fake_run_capture)
+    result = runner.invoke(
+        app, ["capture", "--proxy", "http://127.0.0.1:8080", "--port", "0"]
+    )
+    assert result.exit_code == 0, result.output
+    assert captured.get("proxy") == "http://127.0.0.1:8080", (
+        f"--proxy must thread through to run_capture; got {captured.get('proxy')!r}"
+    )
+
+
+def test_capture_cli_default_proxy_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Arrange: mock run_capture; invoke ``frugon capture`` WITHOUT --proxy.
+    Act/Assert: the CLI threads proxy=None — the privacy default at the CLI seam
+    (locks against a future regression that defaults --proxy to a real proxy).
+    """
+    captured: dict[str, Any] = {}
+
+    def _fake_run_capture(**kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(capture_mod, "run_capture", _fake_run_capture)
+    result = runner.invoke(app, ["capture", "--port", "0"])
+    assert result.exit_code == 0, result.output
+    assert captured.get("proxy") is None, (
+        f"CLI default must thread proxy=None (privacy default); got {captured.get('proxy')!r}"
+    )
+
+
+def test_restricted_opener_rejects_non_http_proxy_scheme() -> None:
+    """Arrange: an explicit proxy with a non-http(s) scheme.
+    Act: _build_restricted_opener(bad).
+    Assert: ValueError up front (mirrors _validate_upstream's scheme allowlist),
+            rather than a deep urllib failure later. urllib cannot route SOCKS/file
+            proxies anyway, so rejecting them with a clear message is correct.
+    """
+    for bad in ("ftp://127.0.0.1:8080", "file:///etc/x", "socks5://127.0.0.1:1080"):
+        with pytest.raises(ValueError, match="proxy scheme"):
+            _build_restricted_opener(bad)
+
+
+# ---------------------------------------------------------------------------
 # Item 6 — cross-origin redirect must strip Authorization header
 # ---------------------------------------------------------------------------
 
