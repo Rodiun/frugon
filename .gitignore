@@ -32,6 +32,10 @@ captures/
 /report.html
 /report.md
 
+# Local-only asset rollback backups — kept on disk as a regeneration safety net,
+# never published (the README points at the live asset, not the -prev copy).
+/assets/*-prev.*
+
 # Local agent config — never ship
 .claude/
 
