@@ -318,12 +318,14 @@ class TestDemoCrossCheck:
         # The cost engine: total == sum of cost-by-model rows == monthly_cost.
         assert result.monthly_cost is not None
         assert sum(result.cost_by_model.values(), Decimal("0")) == result.total_cost
-        assert fig.current == result.monthly_cost
-        # Known-good headline figures (whole-dollar).
-        assert round(fig.current) == 390
-        assert round(fig.blended) == 254
-        assert round(fig.saved) == 136
-        assert round(float(fig.total_pct)) == 35
+        # fig.current and fig.blended are now pre-rounded to 2 dp inside
+        # _split_report_figures (the reconciling rounding).
+        assert fig.current == Decimal("389.88")
+        assert fig.blended == Decimal("254.10")
+        # SAVING == Current − New exactly (no independent rounding divergence).
+        assert fig.saved == fig.current - fig.blended
+        assert fig.saved == Decimal("135.78")
+        assert round(float(fig.total_pct)) == 35  # ~34.8%
         # Routing buckets reconcile to ALL analyzed calls.
         assert result.priced_calls == 56100
         assert (
@@ -332,23 +334,85 @@ class TestDemoCrossCheck:
         )
         assert fig.already_cheap == 10000
 
+    def test_demo_saving_reconciles_with_displayed_current_and_new(self) -> None:
+        """SAVING == Current − New, verifiable from the printed 2-dp figures.
+
+        This is the core reconciling invariant: because _split_report_figures
+        rounds current and blended (≡ New) to 2 dp BEFORE deriving saved, the
+        SAVING printed on every report surface equals the difference the reader
+        can compute mentally from the Current and New figures.  The raw
+        (unrounded) values would have produced saved=$135.7892 while independently
+        rounding 135.7892 to 2 dp gives $135.79 — a $0.01 divergence that this
+        invariant catches.
+        """
+        result = _demo_result()
+        assert result.split is not None
+        fig = _split_report_figures(result, result.split)
+        # The figures are already at 2 dp precision (quantized in the helper).
+        assert fig.current == fig.current.quantize(Decimal("0.01"))
+        assert fig.blended == fig.blended.quantize(Decimal("0.01"))
+        # SAVING is derived — never independently rounded.
+        assert fig.saved == fig.current - fig.blended
+
+    def test_demo_terminal_panel_saving_reconciles_to_printed_current_minus_new(
+        self,
+    ) -> None:
+        """Terminal --demo panel: printed SAVING == printed Current − printed New.
+
+        Regression lock for the divergence where ``_render_split_panel`` computed
+        ``saved`` from RAW components and rounded it independently, printing
+        $135.79 while Current $389.88 − New $254.10 = $135.78 — the exact case the
+        2-dp decision named.  The terminal must agree with the reports to the cent
+        (it now consumes ``_split_report_figures``, the one shared figure source).
+        """
+        from rich.console import Console
+
+        from frugon import report
+
+        result = _demo_result()
+        assert result.split is not None
+        console = Console(width=200, force_terminal=False, no_color=True)
+        captured: list[str] = []
+        original = report.rprint
+
+        def _rp(*args: object, **kwargs: object) -> None:
+            with console.capture() as cap:
+                console.print(*args, **kwargs)
+            captured.append(cap.get())
+
+        report.rprint = _rp  # type: ignore[assignment]
+        try:
+            report._render_split_panel(result, result.split)
+        finally:
+            report.rprint = original
+
+        out = " ".join("".join(captured).split())
+        assert "$389.88" in out  # Current
+        assert "$254.10" in out  # New (blended)
+        assert "$135.78" in out  # SAVING == 389.88 − 254.10 (reconciles)
+        assert "$135.79" not in out  # the independently-rounded value must be gone
+        assert "34.8%" in out
+
     @pytest.mark.parametrize("name", list(_RENDERERS))
     def test_demo_report_current_equals_terminal_current(
         self, name: str, tmp_path: Path
     ) -> None:
-        """report-Current == terminal-Current (== monthly_cost == $390) for --demo."""
+        """report-Current == terminal-Current (== $389.88) for --demo.
+
+        Since v0.1.3, money displays at 2 dp.  The headline Current on every
+        surface is $389.88 (the 2-dp quantization of the raw monthly_cost).
+        """
         result = _demo_result()
         assert result.split is not None
         assert result.monthly_cost is not None
+        fig = _split_report_figures(result, result.split)
         html = _render(name, result, tmp_path)
-        # The HEADLINE Current reconciles to the terminal's Current (== $390),
+        # The HEADLINE Current reconciles to the terminal's Current ($389.88),
         # NOT the baseline-only monthly figure.
         rendered = _headline_current(name, html)
-        # Every surface now renders money at the full _fmt_usd 4-dp precision —
-        # the terminal panel, both Markdown styles, and both HTML styles read
-        # IDENTICALLY (e.g. "$389.8849"), so the headline Current equals the
-        # terminal's monthly_cost at 4-dp on every variant.
-        assert rendered == result.monthly_cost.quantize(Decimal("0.0001"))
+        # All surfaces render at 2-dp precision.
+        assert rendered == Decimal("389.88")
+        assert rendered == fig.current
         assert round(rendered) == 390
         assert abs(rendered - result.split.monthly_baseline) > Decimal("1")  # type: ignore[union-attr]
 
@@ -394,6 +458,399 @@ class TestDemoCrossCheck:
         assert sum(counts) == result.priced_calls == 56100, (name, counts)
 
 
+class TestVerboseSplitPctMatchesPanel:
+    """Render-level regression: the verbose 'Upper bound' note's printed split-%
+    equals the hero panel's printed split-%, even when the raw (unrounded)
+    saving-% and the rounded-component saving-% diverge at 1 decimal place.
+
+    This is the percent analogue of the $135.78-vs-$135.79 dollar-rounding case:
+    both the panel hero and the verbose note read _split_report_figures().total_pct,
+    so they always agree; a naive raw re-derivation inside the note would produce a
+    different 1dp string and the user would read contradictory figures.
+
+    Fixture design:
+      total_cost = 2.005  → quantize(0.01, ROUND_HALF_UP) = 2.01
+      blended_raw = total_cost - (baseline_cost - blended_cost)
+                  = 2.005 - (2.000 - 1.000) = 1.005
+                  → quantize(0.01, ROUND_HALF_UP) = 1.01
+      raw  saving-% = (2.005 - 1.005) / 2.005 * 100 = 49.875... → 1dp "49.9%"
+      rec. saving-% = (2.01  - 1.01)  / 2.01  * 100 = 49.751... → 1dp "49.8%"
+    These two differ at 1dp, proving the fixture exercises the divergence.
+    """
+
+    # The fixture costs (class constants so the divergence proof re-uses them).
+    _TOTAL_COST = Decimal("2.005")
+    _BASELINE_COST = Decimal("2.000")
+    _BLENDED_COST = Decimal("1.000")
+
+    def _divergence_fixture(self) -> tuple[AnalysisResult, SplitRouting]:
+        """Build result + split engineered so raw-% and reconciled-% differ at 1dp."""
+        split = _split(
+            baseline_model="gpt-4o",
+            candidate_model="gpt-4o-mini",
+            routed_count=20,
+            kept_count=5,
+            routed_cost=Decimal("0.400"),
+            kept_cost=Decimal("0.600"),
+            baseline_cost=self._BASELINE_COST,
+            blended_cost=self._BLENDED_COST,
+            easy_threshold=Decimal("0.35"),
+        )
+        result = _result(
+            total_calls=25,
+            priced_calls=25,
+            unpriced_calls=0,
+            total_cost=self._TOTAL_COST,
+            cost_by_model={"gpt-4o": self._TOTAL_COST},
+            calls_by_model={"gpt-4o": 25},
+            # projected_cost drives the wholesale upper-bound note; must produce a
+            # wholesale_saving > split_total_pct (49.8%) so the note renders.
+            # (2.005 - 0.900) / 2.005 * 100 = 55.1% > 49.8% ✓
+            projected_cost=Decimal("0.900"),
+            candidate_model="gpt-4o-mini",
+            observed_span_days=7.0,
+            split=split,
+        )
+        return result, split
+
+    def _capture_verbose(self, result: AnalysisResult) -> str:
+        """Render _render_split_verbose via the rprint-monkeypatch capture pattern."""
+        from rich.console import Console
+
+        from frugon import report
+
+        console = Console(width=200, force_terminal=False, no_color=True)
+        captured: list[str] = []
+        original = report.rprint
+
+        def _rp(*args: object, **kwargs: object) -> None:
+            with console.capture() as cap:
+                console.print(*args, **kwargs)
+            captured.append(cap.get())
+
+        report.rprint = _rp  # type: ignore[assignment]
+        try:
+            assert result.split is not None
+            report._render_split_verbose(result, result.split)
+        finally:
+            report.rprint = original
+        return " ".join("".join(captured).split())
+
+    def _capture_panel(self, result: AnalysisResult) -> str:
+        """Render _render_split_panel via the rprint-monkeypatch capture pattern."""
+        from rich.console import Console
+
+        from frugon import report
+
+        console = Console(width=200, force_terminal=False, no_color=True)
+        captured: list[str] = []
+        original = report.rprint
+
+        def _rp(*args: object, **kwargs: object) -> None:
+            with console.capture() as cap:
+                console.print(*args, **kwargs)
+            captured.append(cap.get())
+
+        report.rprint = _rp  # type: ignore[assignment]
+        try:
+            assert result.split is not None
+            report._render_split_panel(result, result.split)
+        finally:
+            report.rprint = original
+        return " ".join("".join(captured).split())
+
+    def test_verbose_split_pct_equals_panel_pct_on_divergent_fixture(
+        self,
+    ) -> None:
+        """Verbose 'Upper bound' note's split-% == panel hero's split-%, and both
+        equal _split_report_figures().total_pct, on a fixture where the raw
+        (unrounded) saving-% and the reconciled saving-% diverge at 1dp.
+
+        This is a render-level test: both surfaces are rendered via the
+        rprint-monkeypatch capture pattern and the printed XX.X% strings are
+        compared — not an assertion on the helper's return value alone.
+        """
+        result, split = self._divergence_fixture()
+
+        # --- Part 1: prove the fixture genuinely produces a 1dp divergence. ---
+        # If this assertion fails, the fixture no longer exercises the bug class
+        # and the rest of the test would be a no-op.
+        current_raw = self._TOTAL_COST  # 2.005
+        blended_raw = current_raw - (self._BASELINE_COST - self._BLENDED_COST)  # 1.005
+        raw_pct_value = float(
+            (current_raw - blended_raw) / current_raw * Decimal("100")
+        )
+        raw_pct_1dp = round(raw_pct_value, 1)  # 49.9
+
+        from frugon.report import _split_report_figures
+
+        fig = _split_report_figures(result, split)
+        reconciled_pct_value = float(fig.total_pct)
+        reconciled_pct_1dp = round(reconciled_pct_value, 1)  # 49.8
+
+        assert raw_pct_1dp != reconciled_pct_1dp, (
+            f"Fixture no longer exercises a 1dp divergence: "
+            f"raw={raw_pct_1dp}% reconciled={reconciled_pct_1dp}% — pick new costs."
+        )
+
+        # --- Part 2: capture both rendered surfaces. ---
+        verbose_out = self._capture_verbose(result)
+        panel_out = self._capture_panel(result)
+
+        # --- Part 3: extract the XX.X% the verbose note prints for "split above". ---
+        # The note template is:
+        #   "the {float(split_total_pct):.1f}% split above is the conservative, ..."
+        verbose_match = re.search(r"the (\d+\.\d+)% split above", verbose_out)
+        assert verbose_match is not None, (
+            f"'the X.X% split above' not found in verbose output:\n{verbose_out}"
+        )
+        verbose_pct_str = verbose_match.group(1) + "%"  # e.g. "49.8%"
+
+        # --- Part 4: extract the XX.X% the panel hero prints for "% lower". ---
+        # The panel template is: f"{pct} lower" where pct = f"{float(total_pct):.1f}%"
+        panel_match = re.search(r"(\d+\.\d+)% lower", panel_out)
+        assert panel_match is not None, (
+            f"'X.X% lower' not found in panel output:\n{panel_out}"
+        )
+        panel_pct_str = panel_match.group(1) + "%"  # e.g. "49.8%"
+
+        # --- Part 5: the expected string from the shared helper. ---
+        expected_pct_str = f"{reconciled_pct_value:.1f}%"  # "49.8%"
+
+        # Both printed strings must equal the shared helper's figure.
+        assert verbose_pct_str == expected_pct_str, (
+            f"Verbose note printed '{verbose_pct_str}' but expected '{expected_pct_str}' "
+            f"(from _split_report_figures.total_pct={reconciled_pct_value:.4f}%)"
+        )
+        assert panel_pct_str == expected_pct_str, (
+            f"Panel hero printed '{panel_pct_str}' but expected '{expected_pct_str}' "
+            f"(from _split_report_figures.total_pct={reconciled_pct_value:.4f}%)"
+        )
+
+        # Explicit agreement between the two rendered surfaces — the core guard.
+        assert verbose_pct_str == panel_pct_str, (
+            f"Verbose note printed '{verbose_pct_str}' but panel printed '{panel_pct_str}': "
+            f"the two surfaces disagree on the split saving percent."
+        )
+
+
+class TestUpperBoundGateAgreement:
+    """Regression: the DEFAULT-view Upper-bound hint and the VERBOSE Upper-bound
+    note must appear/disappear in LOCKSTEP — they must NEVER disagree on whether
+    the hint is shown.
+
+    The gate predicate on both surfaces is ``wholesale_saving > split_total_pct``.
+    The fix (v0.1.3) routes BOTH surfaces through
+    ``_split_report_figures(...).total_pct`` (the reconciled figure).  Before the
+    fix, ``_render_split_upper_bound_row`` re-derived its gate value from the raw
+    unrounded components, which could differ from the reconciled ``total_pct`` at
+    full Decimal precision.
+
+    Boundary straddle fixture
+    ─────────────────────────
+    Re-uses the ``TestVerboseSplitPctMatchesPanel`` cost constants so the two
+    sets of guards share the same divergence point:
+
+      total_cost = 2.005  → current_rounded = 2.01  (ROUND_HALF_UP)
+      blended_raw = 2.005 − (2.000 − 1.000) = 1.005
+                  → blended_rounded = 1.01 (ROUND_HALF_UP)
+
+      reconciled total_pct = (2.01 − 1.01) / 2.01 × 100 = 49.751 2…%
+      raw total_pct        = (2.005 − 1.005) / 2.005 × 100 = 49.875 3…%
+
+    We choose ``projected_cost = Decimal("1.007")`` so that:
+
+      wholesale_saving = (2.005 − 1.007) / 2.005 × 100 = 49.776…%
+
+    This value satisfies:
+      reconciled_total_pct (49.751…) < wholesale (49.776…) ≤ raw_total_pct (49.875…)
+
+    Under the bug the DEFAULT-view gate fires on raw (49.875 > 49.776 → FALSE →
+    hide), while the verbose gate fires on reconciled (49.751 < 49.776 → TRUE →
+    show) → MISMATCH.  With the fix both fire on reconciled → both show → AGREE.
+    """
+
+    # Shared with TestVerboseSplitPctMatchesPanel — same divergence origin.
+    _TOTAL_COST = Decimal("2.005")
+    _BASELINE_COST = Decimal("2.000")
+    _BLENDED_COST = Decimal("1.000")
+    # chosen so wholesale sits strictly between reconciled_pct and raw_pct
+    _PROJECTED_COST = Decimal("1.007")
+
+    def _boundary_fixture(self) -> tuple[AnalysisResult, SplitRouting]:
+        """Build a result+split where wholesale_saving straddles the raw/reconciled gap."""
+        split = _split(
+            baseline_model="gpt-4o",
+            candidate_model="gpt-4o-mini",
+            routed_count=20,
+            kept_count=5,
+            routed_cost=Decimal("0.400"),
+            kept_cost=Decimal("0.600"),
+            baseline_cost=self._BASELINE_COST,
+            blended_cost=self._BLENDED_COST,
+            easy_threshold=Decimal("0.35"),
+        )
+        result = _result(
+            total_calls=25,
+            priced_calls=25,
+            unpriced_calls=0,
+            total_cost=self._TOTAL_COST,
+            cost_by_model={"gpt-4o": self._TOTAL_COST},
+            calls_by_model={"gpt-4o": 25},
+            projected_cost=self._PROJECTED_COST,
+            candidate_model="gpt-4o-mini",
+            observed_span_days=7.0,
+            split=split,
+        )
+        return result, split
+
+    def _capture_default_row(self, result: AnalysisResult, split: SplitRouting) -> str:
+        """Render _render_split_upper_bound_row (detail_shown=False) via rprint capture."""
+        from rich.console import Console
+
+        from frugon import report
+
+        console = Console(width=200, force_terminal=False, no_color=True)
+        captured: list[str] = []
+        original = report.rprint
+
+        def _rp(*args: object, **kwargs: object) -> None:
+            with console.capture() as cap:
+                console.print(*args, **kwargs)
+            captured.append(cap.get())
+
+        report.rprint = _rp  # type: ignore[assignment]
+        try:
+            report._render_split_upper_bound_row(result, split, detail_shown=False)
+        finally:
+            report.rprint = original
+        return " ".join("".join(captured).split())
+
+    def _capture_verbose(self, result: AnalysisResult, split: SplitRouting) -> str:
+        """Render _render_split_verbose via rprint capture."""
+        from rich.console import Console
+
+        from frugon import report
+
+        console = Console(width=200, force_terminal=False, no_color=True)
+        captured: list[str] = []
+        original = report.rprint
+
+        def _rp(*args: object, **kwargs: object) -> None:
+            with console.capture() as cap:
+                console.print(*args, **kwargs)
+            captured.append(cap.get())
+
+        report.rprint = _rp  # type: ignore[assignment]
+        try:
+            assert result.split is not None
+            report._render_split_verbose(result, result.split)
+        finally:
+            report.rprint = original
+        return " ".join("".join(captured).split())
+
+    def test_upper_bound_gate_agreement_at_boundary(self) -> None:
+        """DEFAULT-view Upper-bound row and VERBOSE Upper-bound note agree on
+        presence/absence when wholesale_saving straddles the raw/reconciled gap.
+
+        On a fixture where ``wholesale_saving`` sits strictly between the raw
+        ``total_pct`` (which the pre-fix default row gated on) and the reconciled
+        ``total_pct`` (which the verbose note always used), a regression would show
+        the hint in one view and hide it in the other.  With the fix (both gate on
+        reconciled) the two must be CONSISTENT.
+        """
+        result, split = self._boundary_fixture()
+
+        # --- Part 1: verify the fixture is a genuine boundary straddle. --------
+        # If this fails, the fixture is degenerate and the test becomes a no-op.
+        from frugon.cost import compute_saving_pct
+        from frugon.report import _split_report_figures
+
+        # Raw total_pct: (baseline_cost − blended_cost) / total_cost × 100.
+        # This is the pre-fix derivation that _render_split_upper_bound_row used.
+        raw_numerator = self._BASELINE_COST - self._BLENDED_COST
+        raw_total_pct = raw_numerator / self._TOTAL_COST * Decimal("100")
+
+        # Reconciled total_pct: what _split_report_figures returns.
+        fig = _split_report_figures(result, split)
+        reconciled_total_pct = fig.total_pct
+
+        # Wholesale saving: exactly what both gate functions compute.
+        wholesale = compute_saving_pct(result.total_cost, result.projected_cost)
+        assert wholesale is not None, "projected_cost must be set for this fixture"
+
+        # Self-check: divergence exists at 1dp.
+        raw_1dp = round(float(raw_total_pct), 1)
+        reconciled_1dp = round(float(reconciled_total_pct), 1)
+        assert raw_1dp != reconciled_1dp, (
+            f"Fixture no longer straddles: raw={raw_1dp}% reconciled={reconciled_1dp}% "
+            f"— pick new costs. (raw_total_pct={float(raw_total_pct):.6f}%, "
+            f"reconciled_total_pct={float(reconciled_total_pct):.6f}%)"
+        )
+
+        # Self-check: wholesale sits strictly between reconciled and raw.
+        lo = min(raw_total_pct, reconciled_total_pct)
+        hi = max(raw_total_pct, reconciled_total_pct)
+        assert lo < wholesale <= hi, (
+            f"wholesale_saving ({float(wholesale):.6f}%) must satisfy "
+            f"min(raw,reconciled) < wholesale <= max(raw,reconciled): "
+            f"lo={float(lo):.6f}%, hi={float(hi):.6f}%. "
+            f"Adjust _PROJECTED_COST."
+        )
+
+        # --- Part 2: render both surfaces. ------------------------------------
+        default_out = self._capture_default_row(result, split)
+        verbose_out = self._capture_verbose(result, split)
+
+        # --- Part 3: detect Upper-bound disclosure presence. ------------------
+        # The default row emits text containing "a full swap to" and/or "saves ~".
+        # The verbose note emits "moving every call to" and/or "saves ~" / "split above".
+        # Either surface is silent (empty string) when the gate closes.
+        _UPPER_BOUND_MARKERS = (
+            "a full swap to",
+            "moving every call to",
+            "saves ~",
+            "split above",
+            "Upper bound",
+        )
+
+        def _has_upper_bound(text: str) -> bool:
+            return any(marker in text for marker in _UPPER_BOUND_MARKERS)
+
+        default_shows = _has_upper_bound(default_out)
+        verbose_shows = _has_upper_bound(verbose_out)
+
+        # --- Part 4: assert lockstep. -----------------------------------------
+        assert default_shows == verbose_shows, (
+            f"Upper-bound gate MISMATCH on boundary fixture:\n"
+            f"  default-view shows={default_shows!r}, verbose shows={verbose_shows!r}\n"
+            f"  wholesale_saving = {float(wholesale):.6f}%\n"
+            f"  reconciled total_pct = {float(reconciled_total_pct):.6f}% "
+            f"(gate threshold — both surfaces MUST use this)\n"
+            f"  raw total_pct = {float(raw_total_pct):.6f}% "
+            f"(pre-fix threshold — default row was gating here)\n"
+            f"  default output: {default_out!r}\n"
+            f"  verbose output: {verbose_out!r}"
+        )
+
+        # --- Part 5: confirm the gate decision is correct (show, not hide). ---
+        # With wholesale > reconciled_total_pct, BOTH surfaces must show the hint.
+        assert wholesale > reconciled_total_pct, (
+            f"Fixture design error: wholesale ({float(wholesale):.6f}%) must be "
+            f"> reconciled_total_pct ({float(reconciled_total_pct):.6f}%)"
+        )
+        assert default_shows, (
+            f"Upper-bound hint should be SHOWN (wholesale {float(wholesale):.6f}% "
+            f"> reconciled {float(reconciled_total_pct):.6f}%) but default view is silent.\n"
+            f"default output: {default_out!r}"
+        )
+        assert verbose_shows, (
+            f"Upper-bound hint should be SHOWN (wholesale {float(wholesale):.6f}% "
+            f"> reconciled {float(reconciled_total_pct):.6f}%) but verbose is silent.\n"
+            f"verbose output: {verbose_out!r}"
+        )
+
+
 class TestHtmlV1InformationParity:
     """HTML v1 carries the SAME figures as the Markdown + HTML v2 surfaces (F4).
 
@@ -403,22 +860,22 @@ class TestHtmlV1InformationParity:
     v1.  These guard the restored parity.
     """
 
-    # The exact full-precision figures the --demo dataset produces (4-dp money,
-    # commas, 1-dp percent), shared verbatim across every surface.
-    # chatgpt-4o-latest baseline: saving=$135.7892, routed=$4.9105,
-    # kept=$247.8250, already-optimal=$1.3602, call shares 64.4%/17.8%.
-    _DEMO_FIGURES = ("135.7892", "4.9105", "247.8250", "1.3602", "64.4%", "17.8%")
+    # The exact 2-dp figures the --demo dataset produces (v0.1.3+).
+    # Headline: current=$389.88, blended=$254.10, saving=$135.78.
+    # Per-bucket costs: routed=$4.91, kept=$247.83, already-optimal=$1.36.
+    # Call shares (unchanged): 64.4%/17.8%.
+    _DEMO_FIGURES = ("135.78", "4.91", "247.83", "1.36", "64.4%", "17.8%")
 
     def test_v1_html_contains_saving_and_per_bucket_figures(
         self, tmp_path: Path
     ) -> None:
         html = _render("html_v1", _demo_result(), tmp_path)
-        # Saving dollar amount beside the hero.
-        assert "135.7892" in html
-        # Per-bucket costs.
-        assert "4.9105" in html  # routed
-        assert "247.8250" in html  # kept
-        assert "1.3602" in html  # already-optimal
+        # Saving dollar amount beside the hero (2 dp).
+        assert "135.78" in html
+        # Per-bucket costs (2 dp).
+        assert "4.91" in html   # routed
+        assert "247.83" in html  # kept
+        assert "1.36" in html   # already-optimal
         # Per-bucket call shares + the share bar markup.
         assert "64.4%" in html
         assert "17.8%" in html

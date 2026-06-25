@@ -113,16 +113,16 @@ $ frugon analyze --demo
 │                                                                             │
 │   Analyzed      56,100 calls  ·  baseline chatgpt-4o-latest (your current   │
 │   model)                                                                    │
-│   Current spend $389.8849 / mo                                              │
+│   Current spend $389.88 / mo                                                │
 │                                                                             │
 │     Route  36,100 easy calls (64.4%)  →  gpt-4o-mini   within tolerance     │
 │     Keep   10,000 hard calls (17.8%)  →  chatgpt-4o-latest                  │
 │     Keep   10,000 already on gpt-4o-mini (17.8%)   already optimal — no     │
 │   action                                                                    │
 │                                                                             │
-│   New spend     $254.0957 / mo                                              │
+│   New spend     $254.10 / mo                                                │
 │                                                                             │
-│   SAVING        $135.7892 / mo    ·    34.8% lower                          │
+│   SAVING        $135.78 / mo    ·    34.8% lower                            │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 

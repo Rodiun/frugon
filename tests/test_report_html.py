@@ -146,21 +146,31 @@ class TestSavingFigure:
     """HTML must surface the saving figure when a candidate is found."""
 
     def test_saving_percentage_present(self, tmp_path: Path) -> None:
-        """Arrange: result with 80% saving (cost=0.025, projected=0.005).
+        """Arrange: result with cost=0.025, projected=0.005.
         Act: render_html.
-        Assert: '80.0%' appears in the HTML (saving % renders at 1 decimal).
+        Assert: '83.3%' appears in the HTML (saving % renders at 1 decimal,
+        RECONCILED from the rounded dollar components per the 2dp design).
+
+        Reconciliation: current $0.025 rounds to $0.03 (2dp ROUND_HALF_UP);
+        projected $0.0050 stays $0.0050 (sub-cent, 4dp). The displayed saving
+        percent is derived from the printed dollars: ($0.03 − $0.0050) / $0.03
+        = $0.0250 / $0.03 = 83.3%, so SAVING == Current − New is verifiable.
         """
         out = tmp_path / "report.html"
         render_html(_make_result(cost="0.0250", projected="0.0050"), out)
         html = out.read_text(encoding="utf-8")
-        assert "80.0%" in html
+        assert "83.3%" in html
 
     def test_current_cost_present(self, tmp_path: Path) -> None:
-        """Assert: the current cost amount appears in the HTML."""
+        """Assert: the current cost amount appears in the HTML.
+
+        _fmt_usd renders amounts >= $0.01 at 2 decimal places (ROUND_HALF_UP),
+        so the current cost 0.1234 displays as $0.12.
+        """
         out = tmp_path / "report.html"
         render_html(_make_result(cost="0.1234"), out)
         html = out.read_text(encoding="utf-8")
-        assert "0.1234" in html
+        assert "$0.12" in html
 
     def test_candidate_model_present(self, tmp_path: Path) -> None:
         """Assert: the candidate model name appears in the HTML."""
@@ -343,7 +353,13 @@ class TestDesignLanguage:
         assert "fbq(" not in html
 
     def test_all_existing_data_fields_preserved(self, tmp_path: Path) -> None:
-        """Assert: all existing data fields remain intact after the restyle."""
+        """Assert: all existing data fields remain intact after the restyle.
+
+        Only the dollar FORMAT changed (4dp → 2dp ROUND_HALF_UP via _fmt_usd);
+        no field is dropped. Current cost 0.1234 → $0.12, projected 0.0250 →
+        $0.03; the candidate, pricing-sync date, window, and model name all
+        still render.
+        """
         out = tmp_path / "report.html"
         result = _make_result(
             cost="0.1234",
@@ -355,8 +371,8 @@ class TestDesignLanguage:
         )
         render_html(result, out)
         html = out.read_text(encoding="utf-8")
-        assert "0.1234" in html
-        assert "0.0250" in html
+        assert "$0.12" in html
+        assert "$0.03" in html
         assert "gpt-4o-mini" in html
         assert "2026-05-01" in html
         assert "7" in html

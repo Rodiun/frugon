@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import html as _html_escape
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -571,13 +571,24 @@ FUNNEL_LINE = (
 
 
 def _fmt_usd(amount: Decimal) -> str:
-    """Format a USD amount with adaptive decimal precision.
+    """Format a USD amount with adaptive decimal precision and ROUND_HALF_UP.
 
-    Sub-$0.0001 amounts use 6 decimal places so they don't display as $0.0000.
+    Three tiers, ascending precision, so a real non-zero cost never prints as
+    $0.00 at standard precision when it is genuinely sub-cent:
+
+    * amounts < $0.0001  → 6 dp  (e.g. $0.000030)
+    * amounts < $0.01    → 4 dp  (e.g. $0.0050)
+    * all other amounts  → 2 dp  (e.g. $389.88)
+    * zero               → 2 dp  ($0.00)
     """
-    if Decimal("0") < amount < Decimal("0.0001"):
-        return f"${float(amount):.6f}"
-    return f"${float(amount):.4f}"
+    _TWO = Decimal("0.01")
+    _FOUR = Decimal("0.0001")
+    _SIX = Decimal("0.000001")
+    if Decimal("0") < amount < _FOUR:
+        return "$" + str(amount.quantize(_SIX, rounding=ROUND_HALF_UP))
+    if Decimal("0") < amount < _TWO:
+        return "$" + str(amount.quantize(_FOUR, rounding=ROUND_HALF_UP))
+    return "$" + str(amount.quantize(_TWO, rounding=ROUND_HALF_UP))
 
 
 # ---------------------------------------------------------------------------
@@ -1015,6 +1026,12 @@ def _split_report_figures(
     the panel's "already optimal" line and the Accounting reconciliation row).
     """
     current, blended, projected = _split_current_and_blended(result, split)
+    # RECONCILIATION: round the two components to the displayed precision before
+    # deriving the saving so that SAVING == Current − New is verifiable from the
+    # printed figures.  The displayed precision for amounts ≥ $0.01 is 2 dp.
+    _DP2 = Decimal("0.01")
+    current = current.quantize(_DP2, rounding=ROUND_HALF_UP)
+    blended = blended.quantize(_DP2, rounding=ROUND_HALF_UP)
     saved = current - blended
     # SAVING percent is honest over the TOTAL current spend (saved / current),
     # NOT the baseline-only split.saving_pct.  Guard the zero-total edge.
@@ -1036,6 +1053,51 @@ def _split_report_figures(
         already_cheap_cost=already_cheap_cost,
         other_models=other_models,
     )
+
+
+def _reconciled_delta_pct(
+    current: Decimal, projected: Decimal
+) -> tuple[Decimal, Decimal, Decimal]:
+    """Quantize *current* and *projected* to their _fmt_usd display precision, then
+    derive the saving percent from the quantized values.
+
+    Contract: the returned *pct* equals ``round(printed_save / printed_current * 100, 1)``
+    for the dollar figures actually printed by ``_fmt_usd``, so the percent on screen
+    is always verifiable from the adjacent Current and After numbers.
+
+    Precision tiers mirror :func:`_fmt_usd`:
+      * amount < $0.0001  → 6 dp
+      * amount < $0.01    → 4 dp
+      * otherwise         → 2 dp (including zero)
+
+    Returns ``(cur_q, proj_q, pct)`` where *cur_q* and *proj_q* are the quantized
+    amounts and *pct* is ``Decimal`` with 1 dp precision.  If *cur_q* rounds to zero
+    (so no non-zero current cost is printed), *pct* is ``Decimal('0.0')``.
+    """
+    _TWO = Decimal("0.01")
+    _FOUR = Decimal("0.0001")
+    _SIX = Decimal("0.000001")
+
+    def _precision(amount: Decimal) -> Decimal:
+        if Decimal("0") < amount < _FOUR:
+            return _SIX
+        if Decimal("0") < amount < _TWO:
+            return _FOUR
+        return _TWO
+
+    cur_q = current.quantize(_precision(current), rounding=ROUND_HALF_UP)
+    proj_q = projected.quantize(_precision(projected), rounding=ROUND_HALF_UP)
+
+    if cur_q == Decimal("0"):
+        return cur_q, proj_q, Decimal("0.0")
+
+    saved = cur_q - proj_q
+    # Compute to full Decimal precision then round to 1 dp, matching the display
+    # format ``f"{float(pct):.1f}%"`` used at every call site.
+    pct = (saved / cur_q * Decimal("100")).quantize(
+        Decimal("0.1"), rounding=ROUND_HALF_UP
+    )
+    return cur_q, proj_q, pct
 
 
 def _call_share_pcts(counts: list[int]) -> list[float]:
@@ -1097,7 +1159,11 @@ def _render_split_panel(result: AnalysisResult, split: SplitRouting) -> None:
     Green is reserved for the saving hero (and, softly, the blended "after"): on
     this screen green always means the money win.
     """
-    current, blended, projected = _split_current_and_blended(result, split)
+    # Consume the ONE shared figure source — the same arithmetic the reports use — so the
+    # terminal panel can never diverge from them. current/blended/saved/total_pct are all
+    # rounded-then-derived there, so SAVING == (Current - New) is guaranteed on screen.
+    fig = _split_report_figures(result, split)
+    current, blended, projected = fig.current, fig.blended, fig.projected
     suffix = " / mo" if projected else ""
     cadence = "monthly" if projected else "observed"
 
@@ -1108,7 +1174,7 @@ def _render_split_panel(result: AnalysisResult, split: SplitRouting) -> None:
     # routed+kept only, which read as 78%/22% while the reports read 64.4/17.8/17.8
     # for the identical data).  The already-optimal bucket therefore also carries
     # its share here, not just a bare count.
-    already_cheap, other_models = _split_accounting(result, split)
+    already_cheap, other_models = fig.already_cheap, fig.other_models
     _share_counts = [split.routed_count, split.kept_count]
     if already_cheap > 0:
         _share_counts.append(already_cheap)
@@ -1203,12 +1269,11 @@ def _render_split_panel(result: AnalysisResult, split: SplitRouting) -> None:
     body.append(f"{_fmt_usd(blended)}{suffix}", style=SAVING_GREEN)
     body.append("\n\n")
 
-    saved = current - blended
-    # SAVING percent is honest over the TOTAL current spend (saved / current),
-    # NOT the baseline-only saving_pct — every figure in the panel reconciles to
-    # the full dataset.  Guard the zero-total edge so a degenerate fixture cannot
-    # divide by zero.
-    total_pct = (saved / current * Decimal("100")) if current else Decimal("0")
+    # saved + total_pct come from the shared source: saved == (Current - New) on the
+    # rounded figures, and the percent stays honest over the TOTAL current spend — so the
+    # printed SAVING reconciles with the printed Current and New.
+    saved = fig.saved
+    total_pct = fig.total_pct
     pct = f"{float(total_pct):.1f}%"
     body.append("SAVING".ljust(_PANEL_LABEL_WIDTH), style=f"bold {SAVING_GREEN}")
     body.append(f"{_fmt_usd(saved)}{suffix}", style=f"bold {SAVING_GREEN}")
@@ -1546,9 +1611,10 @@ def _render_split_upper_bound_row(
     block below — it instead reads ``see notes below for detail`` so the hint
     points at detail that exists rather than re-suggesting a flag already in force.
 
-    Rendered under the SAME guard as the verbose Upper-bound note and computed from
-    the SAME helpers (:func:`_split_current_and_blended` + :func:`compute_saving_pct`),
-    so the figure here, the verbose note, and the wholesale panel can never disagree.
+    Rendered under the SAME guard as the verbose Upper-bound note and gated on the SAME
+    reconciled percent (:func:`_split_report_figures` ``.total_pct`` — the single source
+    the panel hero and the verbose note also read), so this default-view hint, the verbose
+    note, and the wholesale panel can never disagree.
     """
     # The full-swap upper bound is surfaced even when the wholesale winner is the
     # SAME model as the split's easy-call target (audit finding #2): the split
@@ -1559,11 +1625,16 @@ def _render_split_upper_bound_row(
     # dataset and the two savings coincide).
     if not result.candidate_model:
         return
+    # Non-displayed use: compute_saving_pct is intentional here.  This value is used
+    # only as context text ("a full swap saves ~X%") — it is NOT printed adjacent to
+    # a Current / After dollar pair that the user could verify by subtraction.  The
+    # reconciling rounding is therefore not required; raw precision is the correct
+    # behaviour for a standalone informational upper-bound estimate.
     wholesale_saving = compute_saving_pct(result.total_cost, result.projected_cost)
-    current, blended, _projected = _split_current_and_blended(result, split)
-    split_total_pct = (
-        (current - blended) / current * Decimal("100") if current else Decimal("0")
-    )
+    # Gate on the SAME reconciled percent the verbose Upper-bound note and the panel hero
+    # use (`_split_report_figures(...).total_pct`) — so this default-view hint and the
+    # verbose note appear/disappear in lockstep; no raw re-derivation can drift the gate.
+    split_total_pct = _split_report_figures(result, split).total_pct
     if wholesale_saving is None or wholesale_saving <= split_total_pct:
         return
     hint = "see notes below for detail" if detail_shown else "run with --verbose for detail"
@@ -1743,19 +1814,20 @@ def _render_split_verbose(result: AnalysisResult, split: SplitRouting) -> None:
     # Order (Item 7): Upper bound -> Log span -> Method -> Automate.  The
     # Upper-bound decision note leads; the Log-span disclosure follows it.
     # Wholesale upper-bound — the larger, less-conservative full-swap figure.
-    # The quoted split percentage comes from the SAME helper the panel's SAVING
-    # hero uses (total-dataset basis, same rounding), so the note always echoes
-    # the headline figure exactly.
+    # The quoted split percentage IS the panel hero's percent: both read
+    # `_split_report_figures(...).total_pct` (total-dataset basis, derived from the
+    # rounded Current/New), so "the X% split above" always echoes the headline exactly —
+    # no second, independently-rounded derivation can drift from it.
     # Surfaced even when the wholesale winner == the split's easy-call target
     # (audit finding #2): full swap moves every call, the split moves only the
     # easy baseline calls, so the figures differ; the strictly-greater check below
     # keeps it non-redundant when the two coincide (100%-routed wholesale case).
     if result.candidate_model:
+        # Non-displayed use: compute_saving_pct is intentional here.  This value is used
+        # only as context text ("a full swap saves ~X%") — it is NOT printed adjacent to
+        # a Current / After dollar pair that the user could verify by subtraction.
         wholesale_saving = compute_saving_pct(result.total_cost, result.projected_cost)
-        current, blended, _projected = _split_current_and_blended(result, split)
-        split_total_pct = (
-            (current - blended) / current * Decimal("100") if current else Decimal("0")
-        )
+        split_total_pct = _split_report_figures(result, split).total_pct
         if wholesale_saving is not None and wholesale_saving > split_total_pct:
             upper = Text("moving every call to ", style="dim")
             upper.append(result.candidate_model, style=BRAND_CYAN)
@@ -1981,6 +2053,11 @@ def _render_wholesale_panel(result: AnalysisResult) -> None:
     body.append(f"{_fmt_usd(new)}{suffix}", style=SAVING_GREEN)
     body.append("\n\n")
 
+    # RECONCILIATION: round the displayed components first so SAVING == Current − New
+    # is verifiable from the printed figures.
+    _DP2 = Decimal("0.01")
+    current = current.quantize(_DP2, rounding=ROUND_HALF_UP)
+    new = new.quantize(_DP2, rounding=ROUND_HALF_UP)
     saved = current - new
     # SAVING percent is honest over the TOTAL current spend (saved / current) so
     # every figure in the panel reconciles to the full dataset.  Guard the
@@ -4170,6 +4247,9 @@ def _upper_bound_pct(result: AnalysisResult) -> Decimal | None:
         return None
     if not result.candidate_model:
         return None
+    # Non-displayed use: compute_saving_pct is intentional here.  The returned value
+    # is used only as an informational upper-bound context note ("see upper-bound
+    # section") — it is NOT printed adjacent to a Current / After dollar pair.
     wholesale = compute_saving_pct(result.total_cost, result.projected_cost)
     if wholesale is None or wholesale <= split.saving_pct:
         return None
@@ -5113,7 +5193,12 @@ def render_markdown(
             "or check that your log records include a `model` field.",
         ]
     else:
-        saving_pct = compute_saving_pct(result.total_cost, result.projected_cost)
+        # RECONCILIATION: derive saving% from the quantized (displayed) dollar
+        # amounts so the printed percent verifiably equals
+        # round(printed_save / printed_current * 100, 1).
+        # compute_saving_pct is kept for the gate check only (> Decimal("0")).
+        _raw_saving_pct = compute_saving_pct(result.total_cost, result.projected_cost)
+        _, _, saving_pct = _reconciled_delta_pct(result.total_cost, result.projected_cost)
         projection_label = _projection_label(result)
 
         lines += [
@@ -5138,7 +5223,7 @@ def render_markdown(
         if span_line:
             lines.append(span_line)
 
-        if result.candidate_model and saving_pct is not None and saving_pct > Decimal("0"):
+        if result.candidate_model and _raw_saving_pct is not None and _raw_saving_pct > Decimal("0"):
             baseline = _dominant_model(result)
             swap_label = (
                 f"{baseline} → {result.candidate_model}"
@@ -5276,18 +5361,31 @@ def render_markdown_v2(
         output_path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
         return
 
-    saving_pct = compute_saving_pct(result.total_cost, result.projected_cost)
+    # RECONCILIATION: gate on the raw percent (so a positive but sub-display-
+    # precision saving does not vanish), then derive the DISPLAYED percent and
+    # delta from quantized amounts — the same pair _fmt_usd will print.
+    # Prefer the monthly axis (headline basis); fall back to the sample axis.
+    _raw_saving_pct = compute_saving_pct(result.total_cost, result.projected_cost)
+    if result.monthly_cost is not None and result.monthly_projected is not None:
+        _, _, saving_pct = _reconciled_delta_pct(
+            result.monthly_cost, result.monthly_projected
+        )
+        _delta_unit = "/mo"
+    else:
+        _, _, saving_pct = _reconciled_delta_pct(
+            result.total_cost, result.projected_cost
+        )
+        _delta_unit = ""
     projection_label = _projection_label(result)
     has_saving = (
         result.candidate_model is not None
-        and saving_pct is not None
-        and saving_pct > Decimal("0")
+        and _raw_saving_pct is not None
+        and _raw_saving_pct > Decimal("0")
     )
 
     # --- Bottom line (hero) ---
     lines += ["## Bottom line", ""]
     if has_saving:
-        assert saving_pct is not None  # narrowed by has_saving
         # Prefer monthly figures for the before/after when a projection exists.
         if result.monthly_cost is not None and result.monthly_projected is not None:
             before = f"{_fmt_usd(result.monthly_cost)}/mo"
@@ -5361,16 +5459,21 @@ def render_markdown_v2(
     lines.append("")
 
     # Saving delta — concrete dollars, grounding the headline percentage.
+    # RECONCILIATION: _reconciled_delta_pct already quantized both amounts and
+    # derived the percent from the quantized pair; reuse those to compute
+    # delta_amt so SAVING == printed Current − printed After exactly.
     if has_saving:
-        assert saving_pct is not None
         if result.monthly_cost is not None and result.monthly_projected is not None:
-            delta_amt = result.monthly_cost - result.monthly_projected
-            delta_unit = "/mo"
+            _cur_q, _proj_q, _ = _reconciled_delta_pct(
+                result.monthly_cost, result.monthly_projected
+            )
         else:
-            delta_amt = result.total_cost - result.projected_cost
-            delta_unit = ""
+            _cur_q, _proj_q, _ = _reconciled_delta_pct(
+                result.total_cost, result.projected_cost
+            )
+        delta_amt = _cur_q - _proj_q
         lines += [
-            f"**You save {_fmt_usd(delta_amt)}{delta_unit} "
+            f"**You save {_fmt_usd(delta_amt)}{_delta_unit} "
             f"(−{float(saving_pct):.1f}%).**",
             "",
         ]
@@ -5733,7 +5836,7 @@ def _render_html_routing_plan(
 
     Brings the v1 HTML surface to full information parity with the Markdown report
     and HTML v2: every analyzed call is accounted for across the routed / kept /
-    already-optimal buckets, each carrying its full-precision per-bucket Cost and
+    already-optimal buckets, each carrying its per-bucket Cost and
     its share of all analyzed calls (the shared :func:`_call_share_pcts`,
     largest-remainder rounded to sum to exactly 100.0%), closed by a Blended total
     row.  Uses v1's own table aesthetic (the ``table`` / ``td.num`` / ``.badge``
@@ -5905,7 +6008,7 @@ def _render_html_v1_split_body(
 
     # Routing-plan table — full information parity with the Markdown and HTML v2
     # surfaces: per-bucket Calls, % of all analyzed calls (with the shared share
-    # bar), routed-to model, status, and the full-precision per-bucket Cost, then
+    # bar), routed-to model, status, and the per-bucket Cost, then
     # a Blended total row.  Built from the SAME shared figures/helpers
     # (_split_report_figures, _call_share_pcts, _html_share_cell) so every number
     # equals the other surfaces.  Replaces the count-only stat-grid that omitted
@@ -6147,11 +6250,16 @@ def render_html(
             "</div>"
         )
     else:
-        saving_pct = compute_saving_pct(result.total_cost, result.projected_cost)
+        # RECONCILIATION: derive the displayed saving% from the quantized amounts
+        # that _fmt_usd prints, so the hero percent equals
+        # round(printed_save / printed_current * 100, 1).
+        # compute_saving_pct is kept for the gate check (> Decimal("0")) only.
+        _raw_saving_pct = compute_saving_pct(result.total_cost, result.projected_cost)
+        _, _, saving_pct = _reconciled_delta_pct(result.total_cost, result.projected_cost)
         projection_label = _html_escape.escape(_projection_label(result))
 
         # --- Headline card ---
-        if result.candidate_model and saving_pct is not None and saving_pct > Decimal("0"):
+        if result.candidate_model and _raw_saving_pct is not None and _raw_saving_pct > Decimal("0"):
             saving_str = f"{float(saving_pct):.1f}%"
             headline = (
                 f'<div class="saving-hero">{_html_escape.escape(saving_str)}</div>'
@@ -6177,7 +6285,7 @@ def render_html(
                 f" <small>monthly projection</small></div></div>"
             )
 
-        if result.candidate_model and saving_pct is not None and saving_pct > Decimal("0"):
+        if result.candidate_model and _raw_saving_pct is not None and _raw_saving_pct > Decimal("0"):
             baseline = _dominant_model(result)
             swap_label = (
                 f"{_html_escape.escape(baseline)} → {_html_escape.escape(result.candidate_model)}"
@@ -6474,7 +6582,7 @@ section{margin-bottom:30px}
 /* The methodology block and footer always span the full width below. */
 .below{margin-top:6px}
 /* Routing plan spans the full content width below the fold so its five
-   columns (BUCKET | CALLS | MODEL | STATUS | COST) and the full-precision
+   columns (BUCKET | CALLS | MODEL | STATUS | COST) and the
    COST figures have room to sit INSIDE the table at desktop width. */
 .plan-full{margin-top:30px}
 @media (max-width:720px){
@@ -6645,8 +6753,8 @@ section{margin-bottom:30px}
 .tbl-plan th.c-share{text-align:left}
 /* STATUS holds the badge phrase on one line — nowrap prevents wrapping. */
 .tbl-plan .c-status{white-space:nowrap}
-/* COST holds the widest full-precision figure _fmt_usd can emit (a five-figure
-   monthly "$50,000.0000"); nowrap keeps it on one line, right-aligned. */
+/* COST holds the widest figure _fmt_usd can emit (a five-figure monthly
+   "$50,000.00"); nowrap keeps it on one line, right-aligned. */
 .tbl-plan .c-cost{white-space:nowrap}
 /* Bucket label: a single deliberate line ("Routed · easy", "Keep · already
    optimal") — never a squashed wrap. */
@@ -6801,8 +6909,8 @@ section{margin-bottom:30px}
      ~284px phone content box without a horizontal scroll. The desktop layout is
      already table-layout:auto; here we let BUCKET / STATUS wrap, CALLS / COST
      shrink to their figures, and the SHARE column collapse to its compact bar +
-     % so it never dictates an over-wide track. The full-precision COST
-     ("$496.7250") is allowed to wrap so its own min-content is one segment. */
+     % so it never dictates an over-wide track. The COST figure
+     ("$496.72") is allowed to wrap so its own min-content is one segment. */
   .tbl-plan td.bucket,.tbl-plan th.c-bucket{width:auto;white-space:normal}
   .tbl-plan .c-status{width:auto}
   .tbl-plan .c-calls{width:1%}
@@ -6813,7 +6921,7 @@ section{margin-bottom:30px}
      phone; the % stays full-size text beside it (accessible, never colour-only). */
   .tbl-plan .share-bar{width:2.2rem}
   /* Trim the routing-plan gutters one more notch (6px, vs the 9px the cost-by-
-     model table keeps) so the six columns + the full-precision COST fit the
+     model table keeps) so the six columns + the COST figure fit the
      ~284px content box of a 320px phone with no horizontal scroll. The model
      name eases to 0.85rem (~13.6px — still well above the 12px legibility floor)
      to give the cyan MODEL column the room it needs without starving COST.
@@ -7032,12 +7140,13 @@ def _render_html_v2_split_body(
         else "List-price estimate."
     )
 
-    # Money figures use the full-precision _fmt_usd (4 dp) so every figure reads
-    # IDENTICALLY across the terminal panel, the Markdown report, and both HTML
-    # styles — e.g. "$496.7250", never a rounded "$497".  The COST column is
-    # sized for the widest full-precision figure (see the .c-cost CSS note), so a
-    # 4-dp before/after can never overrun its track.  The underlying VALUES are
-    # unchanged; only the displayed precision is unified.
+    # Money figures use the shared _fmt_usd (2 dp for amounts ≥ $0.01, finer only
+    # for sub-cent values) so every figure reads IDENTICALLY across the terminal
+    # panel, the Markdown report, and both HTML styles — e.g. "$496.72".  The
+    # displayed saving and percent reconcile from these rounded figures
+    # (Current − New = SAVING).  The COST column is sized for the widest such
+    # figure (see the .c-cost CSS note), so a before/after pair can never overrun
+    # its track.
     unit = "/mo" if fig.projected else ""
     current_val = _fmt_usd(fig.current)
     blended_val = _fmt_usd(fig.blended)
@@ -7097,10 +7206,10 @@ def _render_html_v2_split_body(
     # --- Routing plan (full width below the fold) ------------------------------
     # Five distinct columns - Bucket | Calls | Model | Status | Cost - so the
     # bucket label, the routed model name, and the decision badge each own a
-    # column and can never collide.  Costs use the full-precision _fmt_usd (the
-    # Cost-by-model formatter) and the section spans the full content width so
-    # the long figures ("$496.7250") sit INSIDE the table rather than overrunning
-    # a half-rail track.
+    # column and can never collide.  Costs use the shared _fmt_usd (2 dp for
+    # amounts ≥ $0.01, the Cost-by-model formatter) and the section spans the full
+    # content width so the figures ("$496.72") sit INSIDE the table rather than
+    # overrunning a half-rail track.
     unit_pct = f"{float(fig.total_pct):.1f}%"
 
     # Per-bucket share of total analyzed calls.  The SHARE column reclaims the
@@ -7389,12 +7498,26 @@ def render_html_v2(
         output_path.write_text(html, encoding="utf-8", newline="\n")
         return
 
-    saving_pct = compute_saving_pct(result.total_cost, result.projected_cost)
+    # RECONCILIATION: gate on the raw percent (so a positive but sub-display-
+    # precision saving does not vanish), then derive the DISPLAYED percent and
+    # delta from quantized amounts — the same pair _fmt_usd will print.
+    # Prefer the monthly axis (headline basis); fall back to the sample axis.
+    _raw_saving_pct = compute_saving_pct(result.total_cost, result.projected_cost)
+    if result.monthly_cost is not None and result.monthly_projected is not None:
+        _, _, saving_pct = _reconciled_delta_pct(
+            result.monthly_cost, result.monthly_projected
+        )
+        _delta_unit_v2 = "/mo"
+    else:
+        _, _, saving_pct = _reconciled_delta_pct(
+            result.total_cost, result.projected_cost
+        )
+        _delta_unit_v2 = ""
     projection_label = esc(_projection_label(result))
     has_saving = (
         result.candidate_model is not None
-        and saving_pct is not None
-        and saving_pct > Decimal("0")
+        and _raw_saving_pct is not None
+        and _raw_saving_pct > Decimal("0")
     )
 
     # The after-swap dagger markers (hero + the What-we-found matrix) point at the
@@ -7434,7 +7557,6 @@ def render_html_v2(
     # --- Hero: the saving ---
     hero = ['<section>', '<div class="eyebrow">Bottom line</div>']
     if has_saving:
-        assert saving_pct is not None
         pct_str = f"{float(saving_pct):.1f}%"
         # Before -> after frame: prefer monthly figures when a projection exists.
         if result.monthly_cost is not None and result.monthly_projected is not None:
@@ -7548,18 +7670,23 @@ def render_html_v2(
 
     # Saving delta — concrete dollars saved + percent. Prefer the monthly axis
     # (the figure that grounds the hero); fall back to the sample axis.
+    # RECONCILIATION: _reconciled_delta_pct already quantized both amounts and
+    # derived the percent from the quantized pair; reuse those to compute
+    # delta_amt so SAVING == printed Current − printed After exactly.
     if has_saving:
-        assert saving_pct is not None
         if result.monthly_cost is not None and result.monthly_projected is not None:
-            delta_amt = result.monthly_cost - result.monthly_projected
-            delta_unit = "/mo"
+            _cur_q, _proj_q, _ = _reconciled_delta_pct(
+                result.monthly_cost, result.monthly_projected
+            )
         else:
-            delta_amt = result.total_cost - result.projected_cost
-            delta_unit = ""
+            _cur_q, _proj_q, _ = _reconciled_delta_pct(
+                result.total_cost, result.projected_cost
+            )
+        delta_amt = _cur_q - _proj_q
         found.append(
             '<div class="delta">'
             '<span class="delta-label">You save</span>'
-            f'<span class="delta-value tnum">{_fmt_usd(delta_amt)}{delta_unit}</span>'
+            f'<span class="delta-value tnum">{_fmt_usd(delta_amt)}{_delta_unit_v2}</span>'
             f'<span class="delta-pct tnum">&minus;{float(saving_pct):.1f}%</span>'
             "</div>"
         )

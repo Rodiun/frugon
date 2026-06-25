@@ -183,7 +183,7 @@ class TestWholesalePanel:
         # Current 800 / mo, New 240 / mo -> SAVING 560 / mo, 70% lower.
         # Money renders at full _fmt_usd precision on every surface (terminal
         # matches the reports); the saving percent carries one decimal.
-        assert "$560.0000 / mo" in out
+        assert "$560.00 / mo" in out
         assert "70.0% lower" in out
 
     def test_saving_uses_emerald(self) -> None:
@@ -223,18 +223,17 @@ class TestWholesalePanel:
         ]
         assert emerald_spans, "SAVING hero must be styled with the emerald saving green"
 
-    def test_money_figures_are_full_precision(self, capsys: Any) -> None:
-        """Money is full _fmt_usd precision on every surface — '$800.0000 / mo'.
+    def test_money_figures_are_2dp(self, capsys: Any) -> None:
+        """Money displays at 2 dp on every surface — '$800.00 / mo'.
 
-        The terminal panel matches the Markdown/HTML reports exactly: no rounded
-        '$800 / mo' hero — every money figure carries the report's 4-dp precision
-        so a figure reads identically across all five render surfaces.
+        Since v0.1.3, the terminal panel renders whole-dollar amounts at 2 dp
+        (not 4 dp), matching the Markdown/HTML reports exactly.
         """
         render_terminal(_result_wholesale())
         out = " ".join(capsys.readouterr().out.split())
-        assert "$800.0000 / mo" in out
-        # The old rounded hero ('$800 / mo' with no decimals) must be gone.
-        assert "$800 / mo" not in out
+        assert "$800.00 / mo" in out
+        # The old 4-dp format is gone.
+        assert "$800.0000 / mo" not in out
 
 
 class TestWholesaleAccounting:

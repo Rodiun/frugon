@@ -124,7 +124,7 @@ def test_pd_scenario_recommended_row_equals_headline_newspend_to_the_cent() -> N
         f"{headline_newspend}"
     )
     # Spot-check the known-good DISPLAY figure (chatgpt-4o-latest demo, 30-day span);
-    # renderers quantize to 4 dp, which is what the user sees ($331.0269).
+    # since v0.1.3 renderers display at 2 dp, but the underlying Decimal is unchanged.
     assert headline_newspend.quantize(Decimal("0.0001")) == Decimal("331.0269")
 
 
@@ -156,17 +156,19 @@ def test_pd_scenario_renders_consistently_on_terminal_and_html(
     render_terminal(result)
     out = " ".join(capsys.readouterr().out.split())
     # Headline routes to the rated pick gpt-4o at the reconciled New-spend.
+    # Since v0.1.3, amounts >= $0.01 display at 2 dp: $331.0269 -> $331.03.
     assert "gpt-4o" in out
-    assert "331.0269" in out
+    assert "331.03" in out
     # frugon-eval-unrated-x1 appears once (considered), at its full-dataset figure.
+    # $286.5187 -> $286.52 at 2 dp.
     assert "frugon-eval-unrated-x1" in out
-    assert "286.5187" in out
+    assert "286.52" in out
 
     html_path = tmp_path / "r.html"
     render_html(result, html_path)
     html = html_path.read_text(encoding="utf-8")
-    assert "286.5187" in html
-    assert "331.0269" in html
+    assert "286.52" in html
+    assert "331.03" in html
 
 
 # ---------------------------------------------------------------------------

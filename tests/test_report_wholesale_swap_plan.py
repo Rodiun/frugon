@@ -339,10 +339,10 @@ class TestNumericParity:
         out = tmp_path / "ws.md"
         render_markdown(_result_wholesale(), out)
         md = out.read_text(encoding="utf-8")
-        # _fmt_usd formats with 4 decimal places
-        assert "777.0000" in md
-        assert "23.0000" in md
-        assert "800.0000" in md
+        # _fmt_usd formats with 2 decimal places (ROUND_HALF_UP) for amounts >= $0.01
+        assert "777.00" in md
+        assert "23.00" in md
+        assert "800.00" in md
 
 
 # ---------------------------------------------------------------------------

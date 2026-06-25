@@ -679,25 +679,42 @@ def test_fmt_usd_sub_0001_uses_6_decimals() -> None:
     assert result != "$0.0000"  # must not be truncated to zero
 
 
-def test_fmt_usd_normal_amount_uses_4_decimals() -> None:
-    """Arrange: amount >= $0.0001.
-    Assert: _fmt_usd uses standard 4 decimal places.
+def test_fmt_usd_sub_cent_uses_4_decimals() -> None:
+    """Arrange: amount in [$0.0001, $0.01) — sub-cent but not sub-$0.0001.
+    Assert: _fmt_usd uses 4 decimal places so the value is not silently rounded
+    to $0.00 (which would be a 100% error for a $0.005 amount).
     """
     from decimal import Decimal
 
     from frugon.report import _fmt_usd
 
     assert _fmt_usd(Decimal("0.0025")) == "$0.0025"
-    assert _fmt_usd(Decimal("1.50")) == "$1.5000"
+    assert _fmt_usd(Decimal("0.0050")) == "$0.0050"
+    assert _fmt_usd(Decimal("0.0099")) == "$0.0099"
 
 
-def test_fmt_usd_zero_uses_4_decimals() -> None:
-    """Assert: zero amount uses 4 decimal places ($0.0000)."""
+def test_fmt_usd_normal_amount_uses_2_decimals() -> None:
+    """Arrange: amount >= $0.01.
+    Assert: _fmt_usd uses 2 decimal places with ROUND_HALF_UP.
+    """
     from decimal import Decimal
 
     from frugon.report import _fmt_usd
 
-    assert _fmt_usd(Decimal("0")) == "$0.0000"
+    assert _fmt_usd(Decimal("1.50")) == "$1.50"
+    assert _fmt_usd(Decimal("389.8849")) == "$389.88"
+    assert _fmt_usd(Decimal("389.885")) == "$389.89"  # half-up rounds away from zero
+    assert _fmt_usd(Decimal("0.01")) == "$0.01"
+    assert _fmt_usd(Decimal("100.00")) == "$100.00"
+
+
+def test_fmt_usd_zero_uses_2_decimals() -> None:
+    """Assert: zero amount uses 2 decimal places ($0.00)."""
+    from decimal import Decimal
+
+    from frugon.report import _fmt_usd
+
+    assert _fmt_usd(Decimal("0")) == "$0.00"
 
 
 def test_html_report_uses_fmt_usd_for_sub_cent_cost(tmp_path: Path) -> None:

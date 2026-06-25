@@ -1,5 +1,18 @@
 # frugon roadmap
 
+## Changelog
+
+### v0.1.3
+
+- Money totals now display at 2 decimal places (e.g. `$389.88` instead of
+  `$389.8849`). Sub-cent amounts keep the precision they need: amounts below
+  $0.01 display at 4 dp, amounts below $0.0001 display at 6 dp, so a real
+  cost never collapses to `$0.00`. All reported savings are derived from the
+  rounded components, so Current − New = SAVING is verifiable from the printed
+  figures.
+
+---
+
 Planned enhancements, kept public and concrete. Items here are not yet
 implemented; they describe where the routing and reporting are headed.
 

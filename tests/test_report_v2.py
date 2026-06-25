@@ -26,7 +26,9 @@ from frugon.cost import AnalysisResult
 from frugon.report import (
     FUNNEL_LINE,
     QUALITY_CAVEAT,
+    render_html,
     render_html_v2,
+    render_markdown,
     render_markdown_v2,
 )
 from frugon.routing import SplitRouting
@@ -144,14 +146,17 @@ def _has_external_asset(html: str) -> bool:
 
 
 def test_html_v2_contains_saving_figure_when_candidate(tmp_path: Path) -> None:
-    """Arrange: result with a ~66% saving.
-    Act: render_html_v2.
-    Assert: the saving percentage appears in the HTML.
+    """Arrange: result with a saving that reconciles to 60.0% from the printed figures.
+
+    Reconciling arithmetic (v0.1.3+): monthly_cost $0.1042 → $0.10; monthly_projected
+    $0.0355 → $0.04; saving = $0.10 − $0.04 = $0.06; pct = $0.06 / $0.10 = 60.0%.
+    The raw (un-reconciled) value would be (0.1042 − 0.0355) / 0.1042 = 66.0%, but
+    that no longer matches the printed Current and After figures.
     """
     out = tmp_path / "report.html"
     render_html_v2(_result_with_candidate(), out)
     html = out.read_text(encoding="utf-8")
-    assert "66.0%" in html
+    assert "60.0%" in html
 
 
 def test_html_v2_contains_projection_label_when_candidate(tmp_path: Path) -> None:
@@ -197,12 +202,16 @@ def test_html_v2_contains_methodology_keywords(tmp_path: Path) -> None:
 
 
 def test_html_v2_before_after_frame_present(tmp_path: Path) -> None:
-    """Assert: the before -> after monthly figures are both shown."""
+    """Assert: the before -> after monthly figures are both shown.
+
+    Since v0.1.3, amounts >= $0.01 display at 2 dp: $0.1042 -> $0.10,
+    $0.0355 -> $0.04.
+    """
     out = tmp_path / "report.html"
     render_html_v2(_result_with_candidate(), out)
     html = out.read_text(encoding="utf-8")
-    assert "$0.1042" in html  # current monthly
-    assert "$0.0355" in html  # projected monthly
+    assert "$0.10" in html  # current monthly (0.1042 -> 2 dp)
+    assert "$0.04" in html  # projected monthly (0.0355 -> 2 dp)
 
 
 # ===========================================================================
@@ -492,27 +501,34 @@ def test_html_v2_what_we_found_is_comparison_matrix(tmp_path: Path) -> None:
 
 
 def test_html_v2_after_swap_row_uses_green(tmp_path: Path) -> None:
-    """Assert: the after-swap row carries the positive green treatment."""
+    """Assert: the after-swap row carries the positive green treatment.
+
+    Since v0.1.3: $0.0083 is < $0.01 so stays at 4 dp; $0.0355 >= $0.01
+    so renders at 2 dp as $0.04.
+    """
     out = tmp_path / "report.html"
     render_html_v2(_result_with_candidate(), out)
     html = out.read_text(encoding="utf-8")
     # The after-swap row is class-tagged so the CSS paints its figures green.
     assert 'class="after"' in html
-    # Both after-swap figures (sample + monthly) are present.
-    assert "$0.0083" in html  # projected sample cost
-    assert "$0.0355" in html  # projected monthly cost
+    # Sample cost is sub-cent → 4 dp (unchanged); monthly cost is >= $0.01 → 2 dp.
+    assert "$0.0083" in html  # projected sample cost (< $0.01, stays 4 dp)
+    assert "$0.04" in html    # projected monthly cost (0.0355 → 2 dp)
 
 
 def test_html_v2_surfaces_monthly_saving_delta(tmp_path: Path) -> None:
     """Assert: the concrete monthly saving delta grounds the hero percentage.
 
-    monthly_cost 0.1042 - monthly_projected 0.0355 = 0.0687 saved /mo (~66%).
+    Reconciling arithmetic (v0.1.3+): round the displayed components first, then
+    derive the saving.  $0.1042 rounds to $0.10; $0.0355 rounds to $0.04;
+    saving = $0.10 - $0.04 = $0.06/mo.  The raw subtraction ($0.0687) is no
+    longer shown — the printed saving verifiably equals Current minus New.
     """
     out = tmp_path / "report.html"
     render_html_v2(_result_with_candidate(), out)
     html = out.read_text(encoding="utf-8")
     assert 'class="delta"' in html
-    assert "$0.0687/mo" in html
+    assert "$0.06/mo" in html
     assert "You save" in html
 
 
@@ -754,14 +770,18 @@ def test_html_v2_no_candidate_omits_after_swap_and_delta(tmp_path: Path) -> None
 
 
 def test_markdown_v2_leads_with_bottom_line(tmp_path: Path) -> None:
-    """Assert: the report leads with a 'Bottom line' headline section."""
+    """Assert: the report leads with a 'Bottom line' headline section.
+
+    Reconciling arithmetic (v0.1.3+): monthly_cost $0.1042 → $0.10; monthly_projected
+    $0.0355 → $0.04; pct = $0.06 / $0.10 = 60.0% (reconciled from printed figures).
+    """
     out = tmp_path / "report.md"
     render_markdown_v2(_result_with_candidate(), out)
     md = out.read_text(encoding="utf-8")
     assert "## Bottom line" in md
     # The bottom line names the saving and a before -> after.
     bottom = md.split("## Bottom line", 1)[1].split("##", 1)[0]
-    assert "66.0%" in bottom
+    assert "60.0%" in bottom
     assert "→" in bottom
 
 
@@ -814,13 +834,19 @@ def test_markdown_v2_what_we_found_is_comparison_table(tmp_path: Path) -> None:
 
 
 def test_markdown_v2_surfaces_saving_delta(tmp_path: Path) -> None:
-    """Assert: the concrete monthly saving delta is stated (0.0687/mo, ~66%)."""
+    """Assert: the concrete monthly saving delta reconciles with the printed figures.
+
+    Reconciling arithmetic (v0.1.3+): $0.1042 → $0.10; $0.0355 → $0.04;
+    saving = $0.10 − $0.04 = $0.06/mo.  The percent equals $0.06 / $0.10 = 60.0%
+    — verifiable directly from the printed Current and After figures.
+    The raw (un-reconciled) value (0.0687 / 0.1042 = 66.0%) is no longer shown.
+    """
     out = tmp_path / "report.md"
     render_markdown_v2(_result_with_candidate(), out)
     md = out.read_text(encoding="utf-8")
-    assert "$0.0687/mo" in md
+    assert "$0.06/mo" in md
     assert "You save" in md
-    assert "−66.0%" in md
+    assert "−60.0%" in md
 
 
 def test_markdown_v2_metadata_demoted(tmp_path: Path) -> None:
@@ -1021,3 +1047,95 @@ def test_html_v2_routing_plan_contains_within_viewport(tmp_path: Path) -> None:
     )
 
 
+# ===========================================================================
+# §2a reconciliation regression: full-swap percent must match printed dollars
+# ===========================================================================
+
+
+def _divergence_result(**kwargs: Decimal) -> AnalysisResult:
+    """Fixture whose RAW full-swap percent (65.9%) diverges from the percent
+    that is verifiable from the printed dollar figures (60.0%).
+
+    Arithmetic:
+      total_cost  = $0.1042  →  _fmt_usd → $0.10  (2dp tier)
+      projected   = $0.0355  →  _fmt_usd → $0.04  (2dp tier)
+      printed save            =  $0.10 − $0.04 = $0.06
+      reconciled %            =  $0.06 / $0.10 × 100 = 60.0%   ← correct
+      raw %       (unrounded) =  0.0687 / 0.1042 × 100 = 65.93 → 65.9%  ← wrong
+
+    The fixture omits monthly_cost/monthly_projected so all four renderers
+    use the same total_cost/projected_cost axis — simplifying per-surface
+    verification.
+    """
+    overrides: dict[str, Decimal] = dict(kwargs)
+    total = overrides.get("total_cost", Decimal("0.1042"))
+    projected = overrides.get("projected_cost", Decimal("0.0355"))
+    return AnalysisResult(
+        total_calls=35,
+        priced_calls=35,
+        unpriced_calls=0,
+        total_cost=total,
+        projected_cost=projected,
+        cost_by_model={"gpt-4-turbo": total},
+        calls_by_model={"gpt-4-turbo": 35},
+        candidate_model="gpt-4o",
+    )
+
+
+def test_full_swap_pct_reconciles_with_printed_dollars(tmp_path: Path) -> None:
+    """All four report surfaces must print a saving percent that is verifiable from
+    the adjacent Current and After dollar figures.
+
+    This is the §2a regression guard: before the fix, the percent was derived from
+    raw (un-rounded) costs, so the user could NOT reproduce the printed percent by
+    computing (Current − After) / Current from the numbers on screen.  The fix
+    routes every displayed full-swap percent through ``_reconciled_delta_pct``,
+    which first quantises both amounts to their ``_fmt_usd`` display precision and
+    derives the percent from the quantised pair.
+
+    Fixture: total_cost=$0.1042, projected=$0.0355.
+      _fmt_usd($0.1042) = "$0.10",  _fmt_usd($0.0355) = "$0.04"
+      printed_save = $0.10 − $0.04 = $0.06
+      reconciled_pct = $0.06 / $0.10 × 100 = 60.0%
+      raw_pct (legacy, wrong) = 0.0687 / 0.1042 × 100 = 65.93… → 65.9%
+
+    Self-check asserts the two diverge at 1dp so a regression would surface.
+    Per-surface asserts verify 60.0% is present and 65.9% is absent.
+    """
+    result = _divergence_result()
+
+    # Self-check: raw and reconciled MUST diverge so a regression is detectable.
+    # Use f":.1f" formatting (same as the old display path) for correct half-up rounding.
+    _DP2 = Decimal("0.01")
+    raw_pct_str = f"{float((result.total_cost - result.projected_cost) / result.total_cost * Decimal('100')):.1f}"
+    cur_q = result.total_cost.quantize(_DP2)
+    proj_q = result.projected_cost.quantize(_DP2)
+    reconciled_pct_str = f"{float((cur_q - proj_q) / cur_q * Decimal('100')):.1f}"
+    assert raw_pct_str != reconciled_pct_str, (
+        f"self-check failed: raw {raw_pct_str!r} == reconciled {reconciled_pct_str!r}; "
+        "choose a fixture where the two differ at 1dp"
+    )
+    assert raw_pct_str == "65.9", f"expected raw pct '65.9', got {raw_pct_str!r}"
+    assert reconciled_pct_str == "60.0", f"expected reconciled pct '60.0', got {reconciled_pct_str!r}"
+
+    # Per-surface: the reconciled percent must appear; the raw must not.
+    surfaces: dict[str, str] = {}
+    for label, renderer, ext in (
+        ("md_v1", render_markdown, "md"),
+        ("md_v2", render_markdown_v2, "md"),
+        ("html_v1", render_html, "html"),
+        ("html_v2", render_html_v2, "html"),
+    ):
+        out = tmp_path / f"{label}.{ext}"
+        renderer(result, out)  # type: ignore[operator]
+        surfaces[label] = out.read_text(encoding="utf-8")
+
+    for label, text in surfaces.items():
+        assert "60.0%" in text, (
+            f"{label}: reconciled percent 60.0% not found; "
+            "the raw (un-reconciled, 65.9%) is no longer acceptable"
+        )
+        assert "65.9%" not in text, (
+            f"{label}: raw (un-reconciled) percent 65.9% still appears; "
+            "the fix did not take effect on this surface"
+        )

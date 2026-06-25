@@ -284,23 +284,24 @@ def test_html_v2_synced_dates_on_separate_meta_line(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_html_v2_routing_plan_cost_uses_full_precision(tmp_path: Path) -> None:
+def test_html_v2_routing_plan_cost_renders_2dp(tmp_path: Path) -> None:
     # Act
     html = _render("html_v2", None, tmp_path)
 
-    # Assert - the routing-plan COST cells render the FULL-precision _fmt_usd
+    # Assert - the routing-plan COST cells render the standard 2dp _fmt_usd
     # figures (identical to the Cost-by-model table), NOT the whole-dollar
-    # rounding that the overflow fix had shipped. The precise number is required
-    # shown, contained inside a widened COST column.
+    # rounding that the overflow fix had shipped, contained inside a widened
+    # COST column.
     #
-    # The routing plan reconciles to the FULL analyzed dataset: Routed ($12.3400)
-    # + Kept ($489.2802) + the already-on-a-cheaper bucket ($7.4448, the 10
-    # gpt-4o-mini calls) + the Blended TOTAL ($248.3452 = total-after-routing).
+    # The routing plan reconciles to the FULL analyzed dataset: Routed ($12.34)
+    # + Kept ($489.28) + the already-on-a-cheaper bucket ($7.44, the 10
+    # gpt-4o-mini calls) + the Blended TOTAL ($248.35 = total-after-routing).
+    # Since v0.1.3, costs ≥ $0.01 display at 2 dp.
     costs = re.findall(r'c-cost">([^<]+)</td>', html)
-    assert costs == ["$12.3400", "$489.2802", "$7.4448", "$248.3452"], costs
+    assert costs == ["$12.34", "$489.28", "$7.44", "$248.35"], costs
     # The CSS keeps the table inside the container at desktop width: AUTO layout
     # (no MODEL/STATUS dead band) under a max-width:100% clamp; the COST cell is
-    # held to one line so the full-precision figure never wraps mid-number.
+    # held to one line so the 2dp figure never wraps mid-number.
     assert ".tbl-plan{table-layout:auto;width:100%;max-width:100%;border-collapse:collapse}" in html
     assert ".tbl-plan .c-cost{white-space:nowrap}" in html
 

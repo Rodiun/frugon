@@ -29,6 +29,25 @@ runner = CliRunner()
 _WIDE_ENV = {"COLUMNS": "200", "TERM": "dumb", "OPENAI_API_KEY": "sk-test-not-real"}
 
 
+def _estimate_line(output: str) -> str:
+    """Return the single ``About to make …`` pre-run ESTIMATE line from *output*.
+
+    The em-dash ban these tests assert is a property of the ESTIMATE line only —
+    its separators are colon/period, never an em-dash (which reads as a minus
+    sign next to the ``×``/``+``/digits).  It is NOT a property of the whole
+    output: the cost-analysis report that prints ABOVE the estimate legitimately
+    carries an em-dash in its dim "Upper bound … saves ~X% — run with --verbose
+    for detail" note (a long-standing, intentional separator in the report body).
+    Pinning the no-em-dash check to this one line mirrors how
+    ``test_large_run_tty_decline_aborts`` already isolates the estimate by its
+    exact substring instead of scanning the whole panel.
+    """
+    for line in output.splitlines():
+        if "About to make" in line:
+            return line
+    raise AssertionError(f"no 'About to make …' estimate line in output:\n{output}")
+
+
 def _priced_row(model: str = "gpt-4o", prompt: str = "classify: spam?") -> dict[str, object]:
     return {
         "model": model,
@@ -126,8 +145,10 @@ def test_large_run_non_tty_prints_estimate_and_proceeds(
     assert "to sample" not in result.output
     # No judge in this run → no judge clause.
     assert "to judge" not in result.output
-    # Separators are colon/period, never an em-dash (reads as a minus sign).
-    assert "—" not in result.output
+    # ESTIMATE-LINE separators are colon/period, never an em-dash (reads as a
+    # minus sign).  Scoped to the estimate line: the report body above it
+    # legitimately carries one in its dim "Upper bound … —" note.
+    assert "—" not in _estimate_line(result.output)
     # No confirm prompt in non-TTY mode.
     assert "Proceed?" not in result.output
 
@@ -163,8 +184,10 @@ def test_large_run_estimate_names_judge_when_judge_set(
         "Estimated cost ~$"
     ) in result.output
     assert "on your keys." in result.output
-    # Colon/period separators only — never an em-dash (reads as a minus sign).
-    assert "—" not in result.output
+    # ESTIMATE-LINE separators are colon/period only — never an em-dash (reads as
+    # a minus sign).  Scoped to the estimate line: the report body above it
+    # legitimately carries one in its dim "Upper bound … —" note.
+    assert "—" not in _estimate_line(result.output)
 
 
 # ---------------------------------------------------------------------------
@@ -268,12 +291,13 @@ def test_large_run_yes_flag_skips_prompt_on_tty(
     )
     assert result.exit_code == 0, result.output
     # --yes shows the estimate but NEVER calls typer.confirm.  No-judge form:
-    # exact count, models inline, no em-dash.
+    # exact count, models inline, no em-dash in the ESTIMATE LINE (the report body
+    # above it legitimately carries one in its dim "Upper bound … —" note).
     assert (
         "About to make 60 provider calls "
         "(20 prompts × 3 models: baseline + 2 candidates)."
     ) in result.output
-    assert "—" not in result.output
+    assert "—" not in _estimate_line(result.output)
     assert prompted == []
 
 

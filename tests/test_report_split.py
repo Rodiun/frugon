@@ -136,19 +136,22 @@ class TestTerminalSplit:
     def test_terminal_hero_is_the_saving(self, capsys: Any) -> None:
         """The hero is the SAVING line — the money won + the percent.
 
-        Every panel figure reconciles to the FULL dataset, not to the baseline
-        model alone: "Current" is the TOTAL spend (cost_by_model sums to 0.0676),
-        the routing reduction on the baseline's easy calls is
-        baseline_cost - blended_cost = 0.0650 - 0.0439 = 0.0211, so the TOTAL
-        blended is 0.0676 - 0.0211 = 0.0465 and the saving is 0.0211 — 31% of the
-        total — the SAME figure the HTML/MD reports now show (the report renderers
-        previously misreported the baseline-only 32%; they now reconcile to
-        this total-basis 31%).
+        Every panel figure reconciles to the FULL dataset AND to the printed,
+        2-dp-rounded dollars (the v0.1.3 reconciling design): "Current" is the
+        TOTAL spend (cost_by_model sums to 0.0676 → printed $0.07), "New" is that
+        total after routing the baseline's easy calls (0.0676 - (0.0650 - 0.0439)
+        = 0.0465 → printed $0.05), so the printed SAVING is $0.07 - $0.05 = $0.02
+        and the percent is derived from those rounded components: $0.02 / $0.07 =
+        28.6% — verifiable straight from the printed figures, the SAME figure the
+        HTML/MD reports now show (every surface shares the one rounded source
+        _split_report_figures, so no surface can contradict another).
         """
         render_terminal(_result_with_split())
         out = " ".join(capsys.readouterr().out.split())
         assert "SAVING" in out
-        assert "31.2% lower" in out  # saving over the TOTAL current spend (1-dp)
+        # Saving over the TOTAL current spend, derived from the 2-dp-rounded
+        # dollars: ($0.07 − $0.05) / $0.07 = 28.6% (1-dp).
+        assert "28.6% lower" in out
         # Current and new-spend figures both appear (full _fmt_usd precision).
         assert "Current spend" in out
         assert "New spend" in out
@@ -543,7 +546,10 @@ class TestHtmlSplit:
         assert SAVING_GREEN in html  # emerald token defined
         assert "gpt-4o-mini" in html
         assert "within tolerance" in html
-        assert "31.2%" in html  # total-basis saving (saved/current, 1-dp), not baseline-only 32%
+        # Total-basis saving derived from the 2-dp-rounded dollars
+        # ($0.07 − $0.05) / $0.07 = 28.6% (1-dp), not the unrounded 31.2% or the
+        # retired baseline-only 32%.
+        assert "28.6%" in html
         assert SPLIT_CAVEAT.split(".")[0] in html
 
     def test_html_v2_split_renders_routing_plan(self, tmp_path: Path) -> None:
@@ -556,7 +562,10 @@ class TestHtmlSplit:
         assert "Blended" in html
         assert "gpt-4o-mini" in html
         assert "within tolerance" in html
-        assert "31.2%" in html  # total-basis saving (saved/current, 1-dp), not baseline-only 32%
+        # Total-basis saving derived from the 2-dp-rounded dollars
+        # ($0.07 − $0.05) / $0.07 = 28.6% (1-dp), not the unrounded 31.2% or the
+        # retired baseline-only 32%.
+        assert "28.6%" in html
 
     def test_html_v2_split_routing_table_column_law(self, tmp_path: Path) -> None:
         """Assert: the routing-plan table carries the SIX-column law with a share bar.
@@ -661,7 +670,10 @@ class TestMarkdownSplit:
         assert "Kept" in md
         assert "Blended" in md
         assert "gpt-4o-mini" in md
-        assert "31.2%" in md  # total-basis saving (saved/current, 1-dp), not baseline-only 32%
+        # Total-basis saving derived from the 2-dp-rounded dollars
+        # ($0.07 − $0.05) / $0.07 = 28.6% (1-dp), not the unrounded 31.2% or the
+        # retired baseline-only 32%.
+        assert "28.6%" in md
 
     def test_markdown_v2_split_shape(self, tmp_path: Path) -> None:
         out = tmp_path / "r.md"
