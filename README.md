@@ -52,8 +52,10 @@ $env:OPENAI_BASE_URL="http://127.0.0.1:8787"; your-app   # PowerShell (Windows)
 ```
 
 Options: `--port`, `--out`, `--upstream` (override the forwarding target), `--verbose`
-(print one line per captured call to verify it's recording). The shim adds no latency
-overhead on localhost and makes no calls to any frugon endpoint.
+(print one line per captured call to verify it's recording), `--proxy` (opt in to route
+upstream calls through a proxy — by default frugon ignores any ambient `HTTP_PROXY` /
+`HTTPS_PROXY`, so your API key never passes through a third-party proxy). The shim adds no
+latency overhead on localhost and makes no calls to any frugon endpoint.
 
 ### Option B — write JSONL directly
 
@@ -130,7 +132,7 @@ $ frugon analyze --demo
                detail
   Quality tier chatgpt-4o-latest: Strong  →  gpt-4o-mini: Capable   (LMArena)
   Prices       synced 2026-06-18
-  Quality      synced 2026-06-19
+  Quality      synced 2026-06-24
 
 ⚠ Quality is not verified — 'within tolerance' is an offline estimate;
   run --measure to confirm it on your real outputs before you switch.
