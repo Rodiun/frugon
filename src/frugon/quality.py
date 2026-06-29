@@ -36,6 +36,7 @@ Category + date filtering:
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 from datetime import date as _date
 from pathlib import Path
@@ -179,7 +180,44 @@ def _extract_model_tiers(data: dict[str, object]) -> dict[str, int]:
     return result
 
 
+_REASON_SAFE_RE = re.compile(r"[^A-Za-z0-9 ,.:%/()=\-]")
+"""Characters permitted in a classification *reason* string.
+
+A reason surfaces in two sinks the fetched data does not control: a shell
+``git commit -m`` argument (quality-sync.yml MINOR path) and a GitHub PR-body
+markdown interpolation (MAJOR path).  Model keys are slugs and every
+legitimately-produced reason is plain ASCII, so stripping everything outside
+this inert set makes the "a reason never carries raw fetched names through to a
+shell/markdown sink" guarantee *structural* rather than an accident of which
+verdict branch produced it.
+
+``%`` is intentionally allowed: it is inert for both shell (inside a
+double-quoted ``git commit -m`` arg) and markdown, and the reason never reaches
+a ``printf``/format-string sink, so it carries no injection risk here.
+"""
+
+
+def _sanitize_reason(reason: str) -> str:
+    """Strip shell/markdown metacharacters from *reason* and bound its length."""
+    return _REASON_SAFE_RE.sub("", reason)[:300]
+
+
 def classify_quality_update(
+    new: dict[str, object],
+    old: dict[str, object] | None,
+) -> tuple[str, str]:
+    """Validate *new*, classify the change vs *old*, return a *sanitized* reason.
+
+    Thin wrapper over :func:`_classify_quality_update_impl` that guarantees the
+    returned reason is shell- and markdown-inert (see :data:`_REASON_SAFE_RE`),
+    so callers may safely surface it in a ``git commit -m`` argument or a PR
+    body without an injection surface.
+    """
+    verdict, reason = _classify_quality_update_impl(new, old)
+    return verdict, _sanitize_reason(reason)
+
+
+def _classify_quality_update_impl(
     new: dict[str, object],
     old: dict[str, object] | None,
 ) -> tuple[str, str]:
@@ -212,7 +250,8 @@ def classify_quality_update(
 
     ``VERDICT_MINOR``
         The new data is valid and the delta is within expected weekly drift
-        bounds — safe to auto-merge after CI.
+        bounds — safe to apply automatically (committed directly to main
+        after the in-job CI gate).
 
     Thresholds are the module-level ``_CLASSIFY_*`` constants so they can be
     tuned and are visible in documentation.

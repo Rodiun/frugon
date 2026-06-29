@@ -2119,6 +2119,32 @@ class TestClassifyQualityUpdate:
 
         assert verdict == VERDICT_INVALID
 
+    def test_reason_is_shell_and_markdown_inert(self) -> None:
+        """A reason derived from fetched model keys must be free of shell and
+        markdown metacharacters before it reaches the git-commit / PR-body sinks.
+
+        quality-sync.yml surfaces the reason in a ``git commit -m`` argument
+        (MINOR path) and a PR body (MAJOR path).  _sanitize_reason makes that
+        safety *structural* — not an accident of which verdict branch ran — so a
+        hostile model key fetched from the upstream dataset cannot carry shell
+        or markdown metacharacters through to either sink.
+        """
+        new = _make_valid_quality_dict(60)
+        # A fetched key laced with shell + markdown metacharacters, given an
+        # out-of-range tier so it surfaces verbatim in the INVALID reason.
+        evil_key = "evil`$(rm -rf /)`;&& cat /etc/passwd | sh <x> '\"\\"
+        new[evil_key] = 99
+
+        verdict, reason = classify_quality_update(new, None)
+
+        assert verdict == VERDICT_INVALID, (
+            f"Expected INVALID for out-of-range tier; got {verdict!r}: {reason}"
+        )
+        for metachar in ["`", "$", ";", "&", "|", "<", ">", '"', "'", "\\"]:
+            assert metachar not in reason, (
+                f"reason must be metachar-inert; found {metachar!r} in: {reason!r}"
+            )
+
     # ------------------------------------------------------------------
     # INVALID — missing tier-0 (frontier absent)
     # ------------------------------------------------------------------

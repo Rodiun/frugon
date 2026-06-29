@@ -67,6 +67,7 @@ def atomic_write_json(
     payload: dict[str, Any],
     *,
     sort_keys: bool = False,
+    trailing_newline: bool = False,
 ) -> None:
     """Write *payload* to *path* via a temp-then-replace atomic operation.
 
@@ -74,11 +75,20 @@ def atomic_write_json(
     callers that need a domain-specific error type should wrap with ``except
     OSError``.  No .tmp file is left on success; any .tmp is removed on
     failure before re-raising.
+
+    When *trailing_newline* is True, a ``\\n`` is appended after the JSON
+    text.  Use this for seed files that must end with a newline so that the
+    on-disk form is the writer's fixed point (a subsequent write that changes
+    only one value produces a one-line diff rather than a whole-file reformat).
+    Default is False so every existing caller is byte-for-byte unchanged.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
+    text = json.dumps(payload, indent=2, sort_keys=sort_keys)
+    if trailing_newline:
+        text += "\n"
     try:
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=sort_keys), encoding="utf-8")
+        tmp.write_text(text, encoding="utf-8")
         tmp.replace(path)
     except OSError:
         tmp.unlink(missing_ok=True)

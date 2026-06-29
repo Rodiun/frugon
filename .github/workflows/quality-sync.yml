@@ -6,6 +6,13 @@ on:
     - cron: "0 7 * * 1"
   workflow_dispatch:
 
+# Serialize runs: the MINOR path commits + pushes to main, so two overlapping
+# runs (e.g. a manual dispatch during the Monday cron) must not race the push.
+# cancel-in-progress: false — never interrupt an in-flight commit/push; queue.
+concurrency:
+  group: quality-sync
+  cancel-in-progress: false
+
 permissions:
   contents: write
   pull-requests: write
@@ -108,10 +115,12 @@ jobs:
               with open(github_output, "a", encoding="utf-8") as fh:
                   fh.write(f"verdict={verdict}\n")
                   # Reason may contain newlines — use a multiline delimiter.
-                  # The delimiter is randomized so fetched model names in the
-                  # reason string cannot terminate it prematurely.
-                  # Invariant: classify_quality_update reasons must never embed
-                  # raw fetched model names (enforced in quality.py).
+                  # The delimiter is randomized so fetched content in the reason
+                  # string cannot terminate it prematurely.
+                  # Defence in depth: classify_quality_update sanitizes every
+                  # reason to a shell-/markdown-inert charset (quality.py
+                  # _sanitize_reason), so the value here is safe to surface in
+                  # the downstream `git commit -m` arg and PR body.
                   delimiter = f"EOF_REASON_{secrets.token_hex(8)}"
                   fh.write(f"reason<<{delimiter}\n{reason}\n{delimiter}\n")
 
@@ -138,55 +147,49 @@ jobs:
           git checkout -- src/frugon/data/quality.json
           echo "Seed discarded — invalid fetch data was NOT committed." >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Open PR — MINOR (CI-gated auto-merge enabled)
+      - name: Validate MINOR quality data (in-job gate)
+        # MINOR drift commits straight to main (no PR), so this in-job gate is
+        # the sole correctness check before it lands: lint + type-check + the
+        # quality/classify and id-drift tests.  ci.yml's cross-OS matrix does
+        # NOT run on the resulting commit (a GITHUB_TOKEN push does not trigger
+        # workflows) — acceptable, because that matrix exercises code across
+        # operating systems and adds nothing for a data-only JSON refresh.
+        # --no-cov: this is a targeted subset, so the global coverage gate
+        # (which expects the whole suite) does not apply.
         if: steps.diff.outputs.changed == 'true' && steps.classify.outputs.verdict == 'MINOR'
-        id: pr_minor
-        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
-        with:
-          commit-message: "chore(quality): sync LMArena quality tiers"
-          branch: chore/quality-sync
-          delete-branch: true
-          title: "chore(quality): weekly quality tier sync [auto-merge]"
-          body: |
-            Automated weekly sync of `src/frugon/data/quality.json` from the
-            [LMArena leaderboard dataset](https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset)
-            (CC-BY-4.0).
-
-            **Verdict: MINOR** — change classified as within expected weekly drift bounds.
-            Auto-merge is enabled; this PR will merge automatically after the CI matrix passes.
-
-            **Reason:** ${{ steps.classify.outputs.reason }}
-          labels: |
-            quality
-            automated
-
-      - name: In-job validation gate (MINOR path)
-        # Run the full quality-data safety gate in-process before enabling
-        # auto-merge.  This is belt-and-braces: gh pr merge --auto only waits
-        # for branch-protection-required checks, and PRs created by the
-        # default GITHUB_TOKEN do not trigger ci.yml on the same repo.
-        # Running linting + type-checking + the quality/classify tests here
-        # gives a synchronous correctness gate before the merge is enabled.
-        #
-        # Operational prerequisites: for auto-merge to be truly CI-gated,
-        # the repository's `main` branch protection must also require the
-        # `CI` matrix status checks.  That is server-side configuration, not
-        # in-repo config — see docs/quality-tiering.md §Operational prerequisites.
-        if: steps.diff.outputs.changed == 'true' && steps.classify.outputs.verdict == 'MINOR' && steps.pr_minor.outputs.pull-request-number != ''
         run: |
           uv run ruff check .
           uv run mypy src
           uv run pytest tests/test_quality.py tests/test_model_id_drift.py -q --no-cov
 
-      - name: Enable auto-merge on MINOR PR
-        if: steps.diff.outputs.changed == 'true' && steps.classify.outputs.verdict == 'MINOR' && steps.pr_minor.outputs.pull-request-number != ''
+      - name: Commit MINOR quality sync directly to main
+        if: steps.diff.outputs.changed == 'true' && steps.classify.outputs.verdict == 'MINOR'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The reason is derived from fetched data; pass it via env and only
+          # ever expand it as a shell variable — never interpolate ${{ ... }}
+          # directly into the run script (command-injection surface).
+          VERDICT_REASON: ${{ steps.classify.outputs.reason }}
         run: |
-          gh pr merge "${{ steps.pr_minor.outputs.pull-request-number }}" \
-            --auto \
-            --squash \
-            --repo "${{ github.repository }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/frugon/data/quality.json
+          git commit \
+            -m "chore(quality): sync LMArena quality tiers" \
+            -m "Verdict: MINOR — within expected weekly drift bounds. Reason: ${VERDICT_REASON}" \
+            -m "Automated weekly sync of src/frugon/data/quality.json from the LMArena leaderboard dataset (CC-BY-4.0)."
+          # Bounded retry: a transient blip (or a rare race the concurrency guard
+          # didn't cover) self-heals by refetching main and replaying the commit.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "✅ Committed MINOR quality sync directly to main (attempt $attempt)." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "push attempt $attempt failed; refetching main and retrying" >&2
+            git fetch origin main && git rebase origin/main || git rebase --abort || true
+            sleep 5
+          done
+          echo "::error::quality sync push failed after 3 attempts" >&2
+          exit 1
 
       - name: Open PR — MAJOR (human review required, auto-merge NOT enabled)
         if: steps.diff.outputs.changed == 'true' && steps.classify.outputs.verdict == 'MAJOR'

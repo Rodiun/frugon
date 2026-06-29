@@ -690,6 +690,189 @@ def fetch_and_update_pricing(
     return {"models_synced": len(priced)}
 
 
+def _fetch_registry(registry_url: str) -> dict[str, Any]:
+    """Validate *registry_url*, fetch, and parse the LiteLLM registry JSON.
+
+    Used by :func:`refresh_seed_prices`.  Uses the same fetch/retry/parse
+    behaviour as :func:`fetch_and_update_pricing`.
+
+    Raises:
+        ValueError: if *registry_url* is not HTTPS or not in the allowed list.
+        PricingUpdateError: on any network, HTTP, or JSON-parse failure.
+    """
+    validate_fetch_url(registry_url, _ALLOWED_PRICING_HOSTS)
+
+    def _on_failure(exc: Exception) -> PricingUpdateError:
+        if isinstance(exc, urllib.error.HTTPError):
+            return PricingUpdateError("pricing registry unavailable")
+        return PricingUpdateError(f"Network error fetching registry: {exc}")
+
+    raw_bytes: bytes = fetch_url_with_retry(
+        registry_url,
+        user_agent=USER_AGENT,
+        max_bytes=_MAX_RESPONSE_BYTES,
+        timeout=30,
+        max_retries=_FETCH_MAX_RETRIES,
+        backoff_base=_FETCH_BACKOFF_BASE,
+        on_failure=_on_failure,
+    )
+
+    try:
+        raw: Any = json.loads(raw_bytes)
+    except json.JSONDecodeError as exc:
+        raise PricingUpdateError(f"JSON parse error in pricing registry: {exc}") from exc
+
+    if not isinstance(raw, dict):
+        raise PricingUpdateError(
+            f"Registry has unexpected shape (expected dict, got {type(raw).__name__})"
+        )
+
+    return raw  # type: ignore[return-value]
+
+
+def refresh_seed_prices(
+    registry_url: str,
+    seed_path: Path,
+    today_date_str: str,
+) -> dict[str, int]:
+    """Refresh the cost values in the curated seed file without changing its model set.
+
+    Designed for a weekly CI workflow: fetches the LiteLLM registry and updates
+    ONLY the ``input_cost_per_token`` / ``output_cost_per_token`` values of seed
+    keys that can be matched EXACTLY in the registry.  Never adds a key the seed
+    does not already have, never removes a key.
+
+    Exact-key match only — no canonicalization, no prefix stripping — so a seed
+    key ``claude-x`` cannot accidentally pick up a registry entry under
+    ``bedrock/us-east-1/claude-x`` (a different price point).
+
+    If no price actually changed the seed file is **not** written and
+    ``_last_synced`` is **not** bumped, keeping ``git diff`` clean for the CI
+    commit gate.  When at least one price changes the file is written atomically
+    and ``_last_synced`` is set to *today_date_str*.
+
+    All metadata keys (those starting with ``_``) and all model keys are
+    preserved.  Only ``input_cost_per_token`` and ``output_cost_per_token``
+    values on already-present model entries may change.
+
+    Args:
+        registry_url: URL of the LiteLLM pricing registry.  Must be HTTPS and
+            resolve to ``raw.githubusercontent.com`` (validated before fetch).
+        seed_path: Path to the seed ``pricing.json`` to update in-place.
+        today_date_str: ISO-8601 date string (``YYYY-MM-DD``) written to
+            ``_last_synced`` when at least one price changes.
+
+    Returns:
+        ``{"checked": N, "updated": M}`` where *N* is the count of non-metadata
+        seed keys examined and *M* is the count whose cost values changed.
+
+    Raises:
+        ValueError: if *registry_url* fails HTTPS/host validation.
+        PricingUpdateError: on network failure, JSON parse error, bad registry
+            shape, or inability to read/parse the seed file.
+    """
+    # 1. Fetch and parse the upstream registry.
+    registry: dict[str, Any] = _fetch_registry(registry_url)
+
+    # 2. Load the existing seed.  A missing or unparseable seed is an error —
+    #    the caller must supply a valid seed path; we must not silently create
+    #    a new one or return an empty baseline.
+    try:
+        with seed_path.open(encoding="utf-8") as fh:
+            raw_seed: Any = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PricingUpdateError(
+            f"Cannot read seed file {seed_path}: {exc}"
+        ) from exc
+
+    if not isinstance(raw_seed, dict):
+        raise PricingUpdateError(
+            f"Seed file {seed_path} has unexpected shape "
+            f"(expected dict, got {type(raw_seed).__name__})"
+        )
+    seed: dict[str, Any] = raw_seed
+
+    # 3. Walk every non-metadata seed key.  Apply the registry price iff:
+    #    - the registry contains an entry under the EXACT same key, AND
+    #    - that entry carries BOTH input_cost_per_token AND output_cost_per_token.
+    #    Otherwise the existing (curated) value is kept unchanged.
+    checked = 0
+    updated = 0
+
+    # Build the output preserving insertion order: metadata keys first (in their
+    # original order), then model keys (in their original order).  We mutate a
+    # fresh output dict rather than the seed in-place so that any mid-loop
+    # failure leaves *seed_path* untouched.
+    output: dict[str, Any] = {}
+
+    for key, value in seed.items():
+        if key.startswith("_"):
+            # Metadata key — copy verbatim; _last_synced overwritten later if
+            # any prices changed.
+            output[key] = value
+            continue
+
+        checked += 1
+        reg_entry = registry.get(key)
+
+        if (
+            isinstance(reg_entry, dict)
+            and "input_cost_per_token" in reg_entry
+            and "output_cost_per_token" in reg_entry
+        ):
+            new_in = reg_entry["input_cost_per_token"]
+            new_out = reg_entry["output_cost_per_token"]
+
+            if isinstance(value, dict):
+                old_in = value.get("input_cost_per_token")
+                old_out = value.get("output_cost_per_token")
+            else:
+                old_in = None
+                old_out = None
+
+            if new_in != old_in or new_out != old_out:
+                # Price changed — patch cost fields; preserve any sibling
+                # fields already present on the seed entry (e.g. a manually
+                # curated "note" field the seed might carry alongside costs).
+                if isinstance(value, dict):
+                    patched: dict[str, Any] = dict(value)
+                else:
+                    patched = {}
+                patched["input_cost_per_token"] = new_in
+                patched["output_cost_per_token"] = new_out
+                output[key] = patched
+                updated += 1
+            else:
+                output[key] = value
+        else:
+            # Key absent from registry or missing cost fields — keep curated
+            # value unchanged.
+            output[key] = value
+
+    # 4. If nothing changed, do not write — preserve file mtime so git diff
+    #    stays clean and the weekly CI workflow does not produce an empty commit.
+    if updated == 0:
+        return {"checked": checked, "updated": 0}
+
+    # 5. Bump _last_synced in the output dict.  The key is guaranteed to be
+    #    in *output* (it was either already in the seed or implicitly absent
+    #    and we insert it now so the file always carries a sync date after a
+    #    real update).
+    output["_last_synced"] = today_date_str
+
+    # 6. Atomic write — never leaves a partial file on disk.
+    #    trailing_newline=True keeps the seed file at its fixed point so that a
+    #    one-price change produces a one-line diff (not a whole-file reformat).
+    try:
+        atomic_write_json(seed_path, output, trailing_newline=True)
+    except OSError as exc:
+        raise PricingUpdateError(
+            f"Failed to write refreshed seed {seed_path}: {exc}"
+        ) from exc
+
+    return {"checked": checked, "updated": updated}
+
+
 def is_pricing_stale(
     last_synced: str | None,
     max_days: int = 30,

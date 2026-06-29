@@ -6,9 +6,17 @@ on:
     - cron: "0 6 * * 1"
   workflow_dispatch:
 
+# Serialize runs: this job commits + pushes to main, so two overlapping runs
+# (e.g. a manual dispatch during the Monday cron) must not race the push.
+# cancel-in-progress: false — never interrupt an in-flight commit/push; queue.
+concurrency:
+  group: pricing-sync
+  cancel-in-progress: false
+
 permissions:
+  # Direct-commits the synced data to main; no PR is opened, so contents:write
+  # is the only scope needed.
   contents: write
-  pull-requests: write
 
 jobs:
   sync:
@@ -27,20 +35,44 @@ jobs:
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
 
       - name: Install project
-        run: uv sync
+        # dev extra so the in-job validation gate (ruff/mypy/pytest) has its
+        # dependencies; the refresh fetch uses only urllib, so no measure extra.
+        run: uv sync --extra dev --frozen
 
-      - name: Update pricing table
+      - name: Refresh curated seed prices
+        # The shipped src/frugon/data/pricing.json is a small CURATED canonical
+        # seed (offline fallback). The full LiteLLM registry is fetched into the
+        # user data dir at runtime by `frugon pricing update`; it must NOT be
+        # dumped into source (bloat + non-canonical keys). refresh_seed_prices
+        # only refreshes the cost values of the seed's EXISTING keys via exact
+        # registry match — it never adds or removes models.
         run: |
           uv run python - <<'EOF'
-          from frugon.pricing import fetch_and_update_pricing, _LITELLM_REGISTRY_URL
           from datetime import date
           from pathlib import Path
-          result = fetch_and_update_pricing(
+
+          from frugon.pricing import (
+              PricingUpdateError,
+              refresh_seed_prices,
               _LITELLM_REGISTRY_URL,
-              Path("src/frugon/data/pricing.json"),
-              date.today().isoformat(),
           )
-          print(f"Synced {result['models_synced']} models")
+
+          # Classify the failure so the unattended cron log distinguishes a
+          # transient upstream blip (re-runs fine next week) from a structural
+          # break (registry moved / host changed — needs a human).
+          try:
+              result = refresh_seed_prices(
+                  _LITELLM_REGISTRY_URL,
+                  Path("src/frugon/data/pricing.json"),
+                  date.today().isoformat(),
+              )
+          except PricingUpdateError as exc:
+              print(f"::warning::pricing refresh fetch/parse failed (likely transient): {exc}")
+              raise
+          except ValueError as exc:
+              print(f"::error::registry URL/host validation failed — upstream may have moved: {exc}")
+              raise
+          print(f"Checked {result['checked']} seed models; refreshed {result['updated']} price(s)")
           EOF
 
       - name: Check for changes
@@ -52,19 +84,44 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Open PR if pricing.json changed
+      - name: Validate pricing data (in-job gate)
+        # Pricing commits straight to main (no PR), so this in-job gate is the
+        # sole correctness check before it lands: lint + type-check + the
+        # pricing, pricing-update, cost-math, and id-drift tests.  These verify
+        # the fetched data loads, applies correctly through the cost math, and
+        # normalises model IDs — the data classes that actually affect output.
+        # ci.yml's cross-OS matrix does NOT run on the resulting commit (a
+        # GITHUB_TOKEN push does not trigger workflows) — acceptable for a
+        # data-only JSON refresh.  --no-cov: targeted subset, global gate N/A.
         if: steps.diff.outputs.changed == 'true'
-        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
-        with:
-          commit-message: "chore(pricing): sync LiteLLM pricing table"
-          branch: chore/pricing-sync
-          delete-branch: true
-          title: "chore(pricing): weekly pricing table sync"
-          body: |
-            Automated weekly sync of `src/frugon/data/pricing.json` from the
-            [LiteLLM registry](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json).
+        run: |
+          uv run ruff check .
+          uv run mypy src
+          uv run pytest tests/test_pricing.py tests/test_pricing_update.py tests/test_cost.py tests/test_model_id_drift.py -q --no-cov
 
-            Review the diff to confirm no unexpected price changes before merging.
-          labels: |
-            pricing
-            automated
+      - name: Commit refreshed seed prices directly to main
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/frugon/data/pricing.json
+          git commit \
+            -m "chore(pricing): refresh curated seed prices" \
+            -m "Automated weekly price refresh of the existing curated models in src/frugon/data/pricing.json from the LiteLLM registry. Existing keys only — no models added or removed."
+          # Bounded retry: a transient blip (or a rare race the concurrency guard
+          # didn't cover) self-heals by refetching main and replaying the commit.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "✅ Committed refreshed seed prices directly to main (attempt $attempt)." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "push attempt $attempt failed; refetching main and retrying" >&2
+            git fetch origin main && git rebase origin/main || git rebase --abort || true
+            sleep 5
+          done
+          echo "::error::pricing seed-price refresh push failed after 3 attempts" >&2
+          exit 1
+
+      - name: No changes — nothing to commit
+        if: steps.diff.outputs.changed == 'false'
+        run: echo "Seed prices already current — no models added/removed, nothing to commit." >> "$GITHUB_STEP_SUMMARY"
