@@ -176,7 +176,7 @@ jobs:
         run: |
           uv run ruff check .
           uv run mypy src
-          uv run pytest tests/test_quality.py tests/test_model_id_drift.py -q
+          uv run pytest tests/test_quality.py tests/test_model_id_drift.py -q --no-cov
 
       - name: Enable auto-merge on MINOR PR
         if: steps.diff.outputs.changed == 'true' && steps.classify.outputs.verdict == 'MINOR' && steps.pr_minor.outputs.pull-request-number != ''
