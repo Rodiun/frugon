@@ -129,10 +129,12 @@ def _render_missing_extra() -> None:
         Panel(
             "[bold]--measure needs LiteLLM[/bold] (the optional [cyan]measure[/cyan] extra).\n\n"
             "Install it:\n"
-            "  [cyan]pip install 'frugon\\[measure]'[/cyan]\n"
-            "  [cyan]uv add 'frugon\\[measure]'[/cyan]\n\n"
-            "[dim]Then re-run your command. The cost analysis itself needs no "
-            "install — only --measure / --judge do.[/dim]",
+            "  [cyan]uv tool install 'frugon\\[measure]' --force[/cyan]\n"
+            "  [cyan]pip install 'frugon\\[measure]'[/cyan]\n\n"
+            "[dim]Use the first line if you installed frugon with uv tool "
+            "install (the recommended way), the pip line if you used pip. "
+            "Then re-run your command — the cost analysis itself needs no "
+            "install, only --measure / --judge do.[/dim]",
             title="[bold yellow]One install needed[/bold yellow]",
             border_style="yellow",
             expand=False,

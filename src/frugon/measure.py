@@ -614,8 +614,8 @@ def _import_litellm() -> Any:
     except ImportError as _exc:
         raise ImportError(
             "The --measure flag requires LiteLLM. "
-            "Install it with:  pip install 'frugon[measure]'  "
-            "or:  uv add 'frugon[measure]'"
+            "Install it with:  uv tool install 'frugon[measure]' --force  "
+            "(or, if you installed frugon with pip:  pip install 'frugon[measure]')"
         ) from _exc
 
 
