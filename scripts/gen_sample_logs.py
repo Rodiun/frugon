@@ -8,18 +8,18 @@ output (the repo GIF is recorded from it and the landing demo card is a
 screenshot of it).  It models a believable **team-scale** workload, not a
 personal dev log:
 
-  * A production assistant / support stack on ``chatgpt-4o-latest`` (Strong
-    quality tier; $5 / $15 per 1M tokens) doing tens of thousands of calls
+  * A production assistant / support stack on ``gpt-5.5`` (Elite
+    quality tier; $5 / $30 per 1M tokens) doing tens of thousands of calls
     over a one-month window.
   * The bulk are routine, short calls — classification, routing, Q&A, short
     summaries, translations — that frugon's per-call difficulty classifier marks
-    EASY and proposes routing to ``gpt-4o-mini`` (Capable tier; $0.15 / $0.60
+    EASY and proposes routing to ``claude-haiku-4-5`` (Strong tier; $1 / $5
     per 1M tokens) — a genuine quality-tier step-down with a compelling saving.
   * A minority are genuinely demanding calls — incident post-mortems, large
     multi-function reviews, long design-doc critiques, deep debugging — that the
     classifier KEEPS on the premium baseline.
-  * A slice of traffic is already running on the cheaper ``gpt-4o-mini`` (a team
-    part-way through a migration) so the demo's accounting line reconciles
+  * A slice of traffic is already running on the cheaper ``claude-haiku-4-5`` (a
+    team part-way through a migration) so the demo's accounting line reconciles
     *every* call: routed + kept + already-on-cheaper == analyzed.
 
 Determinism (binding):
@@ -65,6 +65,19 @@ import tokencost  # type: ignore[import-untyped]
 # no clock.  The text is plausible product / engineering prose so a reader
 # skimming the fixture sees believable content, not "lorem ipsum".
 # ---------------------------------------------------------------------------
+
+# tokencost does not recognise newer model names (e.g. gpt-5.5, claude-haiku-4-5)
+# in its count_string_tokens() call — Anthropic models raise ValueError, and
+# unrecognised names raise KeyError.  Fall back to a known GPT model (gpt-4 uses
+# cl100k_base encoding) which gives correct counts for both GPT and Claude
+# families.  This constant must be defined BEFORE _count_tokens below.
+_TOKENCOST_FALLBACK_MODEL = "gpt-4"  # known-good model for count_string_tokens
+
+# Per-message overhead tokens (role + structural tokens).  The frugon cost engine
+# uses the same constant, so the bundled usage counts stay byte-identical to what
+# the engine recomputes (verified by tests/test_sample_data.py).
+_MSG_OVERHEAD_TOKENS = 4  # per message: <|start|>role\n<|content|><|end|>
+_REPLY_OVERHEAD_TOKENS = 3  # per reply priming
 
 _FILLER_SENTENCES = [
     "The customer opened the ticket after the second failed checkout attempt.",
@@ -116,8 +129,16 @@ def _pad_to_tokens(seed_text: str, target_tokens: int, model: str) -> str:
 
 
 def _count_tokens(text: str, model: str) -> int:
-    """Token count of a bare string under *model*."""
-    return int(tokencost.count_string_tokens(text, model))
+    """Token count of a bare string under *model*.
+
+    tokencost raises for Anthropic models (they don't support count_string_tokens)
+    and for unrecognised model names.  Fall back to a known GPT model (cl100k_base
+    encoding) which gives correct counts for both GPT and Claude families.
+    """
+    try:
+        return int(tokencost.count_string_tokens(text, model))
+    except (ValueError, KeyError):
+        return int(tokencost.count_string_tokens(text, _TOKENCOST_FALLBACK_MODEL))
 
 
 # ---------------------------------------------------------------------------
@@ -331,19 +352,19 @@ HARD_SEEDS = [
 # USD (verified by _report_stats on every run), with an honest 30-40% blended
 # saving and a total "Current" that equals the sum of the per-model cost rows.
 #
-# Baseline: chatgpt-4o-latest at $5/$15 per 1M tokens (Strong quality, tier 1).
-# Candidate: gpt-4o-mini at $0.15/$0.60 per 1M tokens (Capable quality, tier 2).
-# This is a genuine tier-1 → tier-2 step-down (tier_drop = 1) with a compelling
-# ~33x input-price reduction — exactly the coherent story frugon is built to tell.
+# Baseline: gpt-5.5 at $5/$30 per 1M tokens (Elite quality, tier 0).
+# Candidate: claude-haiku-4-5 at $1/$5 per 1M tokens (Strong quality, tier 1).
+# This is a genuine tier-0 → tier-1 step-down (tier_drop = 1) with a compelling
+# ~5x input-price reduction — exactly the coherent story frugon is built to tell.
 #
 # Total monthly spend lands in the hundreds-to-low-thousands register with an
-# honest ~34% blended saving.  Per-call costs are uniform per seed-group
+# honest 30-40% blended saving.  Per-call costs are uniform per seed-group
 # (deterministic padding), so these counts pin the totals precisely.  The exact
 # routed/kept/blended/saving figures are printed by _report_stats from the engine
 # on every run and asserted by the test suite, so they can never silently drift.
-N_TURBO_EASY = 36100  # routine chatgpt-4o-latest calls — routed to gpt-4o-mini
-N_TURBO_HARD = 10000  # genuinely hard chatgpt-4o-latest calls — kept on baseline
-N_GPT4O = 10000  # already migrated to the cheaper gpt-4o-mini (not part of the split)
+N_TURBO_EASY = 36100  # routine gpt-5.5 calls — routed to claude-haiku-4-5
+N_TURBO_HARD = 10000  # genuinely hard gpt-5.5 calls — kept on baseline
+N_CANDIDATE = 10000  # already migrated to the cheaper claude-haiku-4-5 (not part of the split)
 
 WINDOW_DAYS = 30
 
@@ -354,12 +375,27 @@ WINDOW_DAYS = 30
 _BASE_TS = datetime.datetime(2026, 5, 4, 9, 0, 0, tzinfo=datetime.timezone.utc)
 
 
+def _count_message_tokens(messages: list[dict], model: str) -> int:
+    """Count prompt tokens including per-message overhead, mirroring the frugon engine."""
+    total = _REPLY_OVERHEAD_TOKENS
+    for msg in messages:
+        total += _MSG_OVERHEAD_TOKENS
+        total += _count_tokens(msg["content"], model)
+    return total
+
+
 def _make_record(seed: dict, model: str, ts: str) -> dict:
     """Build one log record with honest, tokencost-derived usage counts.
 
     The prompt and completion are padded deterministically to the seed's target
     sizes, then the usage block is computed with tokencost so it matches exactly
     what the cost engine recomputes (tests/test_sample_data.py).
+
+    tokencost.calculate_all_costs_and_tokens() raises KeyError for models not in
+    its registry (e.g. gpt-5.5, claude-haiku-4-5).  We therefore count tokens
+    directly via count_string_tokens (which falls back to cl100k_base for unknown
+    model names — correct for both GPT and Claude families) and compute the
+    message overhead manually to match the frugon engine's counting path.
     """
     user_text = _pad_to_tokens(seed["user"], seed["prompt_target"], model)
     completion = _pad_to_tokens(seed["completion"], seed["completion_target"], model)
@@ -367,15 +403,22 @@ def _make_record(seed: dict, model: str, ts: str) -> dict:
         {"role": "system", "content": seed["system"]},
         {"role": "user", "content": user_text},
     ]
-    counts = tokencost.calculate_all_costs_and_tokens(messages, completion, model)
+    try:
+        counts = tokencost.calculate_all_costs_and_tokens(messages, completion, model)
+        prompt_tokens = int(counts["prompt_tokens"])
+        completion_tokens = int(counts["completion_tokens"])
+    except (KeyError, Exception):
+        # Fallback for models not in tokencost's registry: count via cl100k_base.
+        prompt_tokens = _count_message_tokens(messages, _TOKENCOST_FALLBACK_MODEL)
+        completion_tokens = _count_tokens(completion, _TOKENCOST_FALLBACK_MODEL)
     return {
         "model": model,
         "timestamp": ts,
         "request": {"messages": messages},
         "response": {"choices": [{"message": {"role": "assistant", "content": completion}}]},
         "usage": {
-            "prompt_tokens": int(counts["prompt_tokens"]),
-            "completion_tokens": int(counts["completion_tokens"]),
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
         },
     }
 
@@ -420,17 +463,17 @@ def generate(output_path: Path) -> None:
     easy_cycle: itertools.cycle[int] = itertools.cycle(range(len(EASY_SEEDS)))
     for _ in range(N_TURBO_EASY):
         i = next(easy_cycle)
-        plan.append((i, EASY_SEEDS[i], "chatgpt-4o-latest"))
+        plan.append((i, EASY_SEEDS[i], "gpt-5.5"))
 
     hard_cycle: itertools.cycle[int] = itertools.cycle(range(len(HARD_SEEDS)))
     for _ in range(N_TURBO_HARD):
         i = next(hard_cycle)
-        plan.append((i, HARD_SEEDS[i], "chatgpt-4o-latest"))
+        plan.append((i, HARD_SEEDS[i], "gpt-5.5"))
 
-    gpt4o_cycle: itertools.cycle[int] = itertools.cycle(range(len(EASY_SEEDS)))
-    for _ in range(N_GPT4O):
-        i = next(gpt4o_cycle)
-        plan.append((i, EASY_SEEDS[i], "gpt-4o-mini"))
+    candidate_cycle: itertools.cycle[int] = itertools.cycle(range(len(EASY_SEEDS)))
+    for _ in range(N_CANDIDATE):
+        i = next(candidate_cycle)
+        plan.append((i, EASY_SEEDS[i], "claude-haiku-4-5"))
 
     total = len(plan)
 

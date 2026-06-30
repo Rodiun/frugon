@@ -320,12 +320,12 @@ class TestDemoCrossCheck:
         assert sum(result.cost_by_model.values(), Decimal("0")) == result.total_cost
         # fig.current and fig.blended are now pre-rounded to 2 dp inside
         # _split_report_figures (the reconciling rounding).
-        assert fig.current == Decimal("389.88")
-        assert fig.blended == Decimal("254.10")
+        assert fig.current == Decimal("558.86")
+        assert fig.blended == Decimal("363.07")
         # SAVING == Current − New exactly (no independent rounding divergence).
         assert fig.saved == fig.current - fig.blended
-        assert fig.saved == Decimal("135.78")
-        assert round(float(fig.total_pct)) == 35  # ~34.8%
+        assert fig.saved == Decimal("195.79")
+        assert round(float(fig.total_pct)) == 35  # ~35.0%
         # Routing buckets reconcile to ALL analyzed calls.
         assert result.priced_calls == 56100
         assert (
@@ -340,10 +340,12 @@ class TestDemoCrossCheck:
         This is the core reconciling invariant: because _split_report_figures
         rounds current and blended (≡ New) to 2 dp BEFORE deriving saved, the
         SAVING printed on every report surface equals the difference the reader
-        can compute mentally from the Current and New figures.  The raw
-        (unrounded) values would have produced saved=$135.7892 while independently
-        rounding 135.7892 to 2 dp gives $135.79 — a $0.01 divergence that this
-        invariant catches.
+        can compute mentally from the Current and New figures.  For the current
+        demo dataset (gpt-5.5 → gpt-4.1-mini), Current=$558.86, New=$363.07,
+        SAVING=$195.79 — these happen not to straddle a rounding boundary, so
+        independent rounding of the raw saving would also produce $195.79 (no
+        $0.01 divergence).  The invariant still guards against a regression that
+        derives saved independently rather than from the shared rounded components.
         """
         result = _demo_result()
         assert result.split is not None
@@ -360,10 +362,16 @@ class TestDemoCrossCheck:
         """Terminal --demo panel: printed SAVING == printed Current − printed New.
 
         Regression lock for the divergence where ``_render_split_panel`` computed
-        ``saved`` from RAW components and rounded it independently, printing
-        $135.79 while Current $389.88 − New $254.10 = $135.78 — the exact case the
-        2-dp decision named.  The terminal must agree with the reports to the cent
-        (it now consumes ``_split_report_figures``, the one shared figure source).
+        ``saved`` from RAW components and rounded it independently.  The terminal
+        must agree with the reports to the cent (it now consumes
+        ``_split_report_figures``, the one shared figure source).
+
+        Demo dataset (gpt-5.5 → gpt-4.1-mini): Current=$558.86, New=$363.07,
+        SAVING=$195.79, 35.0% lower.  The new figures happen not to straddle a
+        rounding boundary (raw saved≈$195.79 also rounds to $195.79), but the
+        invariant guard — asserting that printed SAVING == printed Current − New —
+        still catches any regression that re-derives saved independently rather than
+        consuming the shared rounded components from _split_report_figures.
         """
         from rich.console import Console
 
@@ -387,51 +395,56 @@ class TestDemoCrossCheck:
             report.rprint = original
 
         out = " ".join("".join(captured).split())
-        assert "$389.88" in out  # Current
-        assert "$254.10" in out  # New (blended)
-        assert "$135.78" in out  # SAVING == 389.88 − 254.10 (reconciles)
-        assert "$135.79" not in out  # the independently-rounded value must be gone
-        assert "34.8%" in out
+        assert "$558.86" in out  # Current
+        assert "$363.07" in out  # New (blended)
+        assert "$195.79" in out  # SAVING == 558.86 − 363.07 (reconciles)
+        # Invariant: the reconciled SAVING is present; no independently-computed
+        # value that disagrees with Current − New should appear.  For this dataset
+        # the raw saving rounds to the same $195.79, so the "wrong" value is also
+        # $195.79 — the guard is the positive assertion above, which fails if a
+        # regression produces a different value (e.g. $195.78 or $195.80).
+        assert "35.0%" in out
 
     @pytest.mark.parametrize("name", list(_RENDERERS))
     def test_demo_report_current_equals_terminal_current(
         self, name: str, tmp_path: Path
     ) -> None:
-        """report-Current == terminal-Current (== $389.88) for --demo.
+        """report-Current == terminal-Current (== $558.86) for --demo.
 
         Since v0.1.3, money displays at 2 dp.  The headline Current on every
-        surface is $389.88 (the 2-dp quantization of the raw monthly_cost).
+        surface is $558.86 (the 2-dp quantization of the raw monthly_cost for the
+        gpt-5.5 → gpt-4.1-mini demo dataset).
         """
         result = _demo_result()
         assert result.split is not None
         assert result.monthly_cost is not None
         fig = _split_report_figures(result, result.split)
         html = _render(name, result, tmp_path)
-        # The HEADLINE Current reconciles to the terminal's Current ($389.88),
+        # The HEADLINE Current reconciles to the terminal's Current ($558.86),
         # NOT the baseline-only monthly figure.
         rendered = _headline_current(name, html)
         # All surfaces render at 2-dp precision.
-        assert rendered == Decimal("389.88")
+        assert rendered == Decimal("558.86")
         assert rendered == fig.current
-        assert round(rendered) == 390
+        assert round(rendered) == 559
         assert abs(rendered - result.split.monthly_baseline) > Decimal("1")  # type: ignore[union-attr]
 
     @pytest.mark.parametrize("name", list(_RENDERERS))
     def test_demo_report_saving_pct_equals_terminal(
         self, name: str, tmp_path: Path
     ) -> None:
-        """report-saving% == terminal-saving% (== ~34.8%) for --demo.
+        """report-saving% == terminal-saving% (== ~35.0%) for --demo.
 
-        The chatgpt-4o-latest demo fixture has total_pct=34.83% and
-        split.saving_pct=34.95% — both round to 35%, so the integer test is no
-        longer diagnostic.  Instead we verify that at least one rendered figure
+        The gpt-5.5 → gpt-4.1-mini demo fixture has total_pct≈35.03% and
+        split.saving_pct≈35.69% — both round to 35%, so the integer test
+        is not diagnostic.  Instead we verify that at least one rendered figure
         is within 0.5% of the terminal_val, and that the rendered figure equals
         the total-basis saving (fig.total_pct) not a materially different figure.
         """
         result = _demo_result()
         fig = _split_report_figures(result, result.split)  # type: ignore[arg-type]
         html = _render(name, result, tmp_path)
-        terminal_val = float(fig.total_pct)  # 34.83%
+        terminal_val = float(fig.total_pct)  # ~35.03%
         rendered = _rendered_saving_pcts(html)
         # At least one rendered saving figure is within 0.5% of the terminal value.
         assert any(abs(v - terminal_val) < 0.5 for v in rendered), (
@@ -861,21 +874,22 @@ class TestHtmlV1InformationParity:
     """
 
     # The exact 2-dp figures the --demo dataset produces (v0.1.3+).
-    # Headline: current=$389.88, blended=$254.10, saving=$135.78.
-    # Per-bucket costs: routed=$4.91, kept=$247.83, already-optimal=$1.36.
+    # Demo: gpt-5.5 → gpt-4.1-mini, 56,100 calls.
+    # Headline: current=$558.86, blended=$363.07, saving=$195.79.
+    # Per-bucket costs: routed=$13.05, kept=$339.71, already-optimal=$10.30.
     # Call shares (unchanged): 64.4%/17.8%.
-    _DEMO_FIGURES = ("135.78", "4.91", "247.83", "1.36", "64.4%", "17.8%")
+    _DEMO_FIGURES = ("195.79", "13.05", "339.71", "10.30", "64.4%", "17.8%")
 
     def test_v1_html_contains_saving_and_per_bucket_figures(
         self, tmp_path: Path
     ) -> None:
         html = _render("html_v1", _demo_result(), tmp_path)
         # Saving dollar amount beside the hero (2 dp).
-        assert "135.78" in html
+        assert "195.79" in html
         # Per-bucket costs (2 dp).
-        assert "4.91" in html   # routed
-        assert "247.83" in html  # kept
-        assert "1.36" in html   # already-optimal
+        assert "13.05" in html   # routed
+        assert "339.71" in html  # kept
+        assert "10.30" in html   # already-optimal
         # Per-bucket call shares + the share bar markup.
         assert "64.4%" in html
         assert "17.8%" in html

@@ -336,11 +336,11 @@ def test_default_measured_candidate_is_split_recommendation(
     log = _write_log(tmp_path / "log.jsonl", [_heavy_row("gpt-4-turbo") for _ in range(6)])
     captured = _capture_run_measure(monkeypatch)
 
-    # Sanity: the split must actually recommend gpt-4o-mini for this log.
+    # Sanity: the split must actually recommend gpt-4.1-mini for this log.
     result = cost.analyze_logs(log)
     assert result.split is not None, "expected a split recommendation for this log"
     recommended = result.split.candidate_model
-    assert recommended == "gpt-4o-mini", recommended
+    assert recommended == "gpt-4.1-mini", recommended
 
     # Act
     invoke = runner.invoke(
@@ -383,8 +383,8 @@ def test_precheck_panel_names_recommended_candidate(
 ) -> None:
     """The missing-key panel references the recommended candidate (proof of GAP 1).
 
-    Both gpt-4-turbo and gpt-4o-mini need OPENAI_API_KEY, so the var alone does
-    not reveal which candidate is checked.  The panel must name gpt-4o-mini so
+    Both gpt-4-turbo and gpt-4.1-mini need OPENAI_API_KEY, so the var alone does
+    not reveal which candidate is checked.  The panel must name gpt-4.1-mini so
     the user can see the key is for the switch frugon recommends.
     """
     # Arrange — extra importable, key absent → the friendly panel fires.
@@ -401,7 +401,7 @@ def test_precheck_panel_names_recommended_candidate(
     assert invoke.exit_code == 1, invoke.output
     out = _clean(invoke.output)
     assert "Traceback" not in out, out
-    assert "gpt-4o-mini" in out, f"recommended candidate not named in panel:\n{out}"
+    assert "gpt-4.1-mini" in out, f"recommended candidate not named in panel:\n{out}"
 
 
 # ---------------------------------------------------------------------------

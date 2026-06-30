@@ -3,7 +3,7 @@
 Every model in _ROUTING_CANDIDATES must have a known quality tier so frugon
 never auto-routes to an unrated model.  The test also asserts that the
 bundled seed quality.json contains the demo log's dominant baseline model
-(chatgpt-4o-latest), because an unrated baseline suppresses the tier-drop
+(gpt-5.5), because an unrated baseline suppresses the tier-drop
 disclosure that the report relies on.
 
 The quality-tier checks use the BUNDLED seed (src/frugon/data/quality.json)
@@ -50,13 +50,13 @@ class TestDefaultCandidatePoolIsRated:
             "frugon never silently routes to an unknown-quality model."
         )
 
-    def test_demo_baseline_chatgpt_4o_latest_is_rated_in_bundled_seed(self) -> None:
-        # The bundled demo log (sample_logs.jsonl.gz) is dominated by chatgpt-4o-latest
+    def test_demo_baseline_gpt_5_5_is_rated_in_bundled_seed(self) -> None:
+        # The bundled demo log (sample_logs.jsonl.gz) is dominated by gpt-5.5
         # calls; an unrated baseline suppresses the tier-drop disclosure the report
         # surfaces to the user.
         tier_map = _load_bundled_tier_map()
-        assert _is_rated_in_bundled_seed("chatgpt-4o-latest", tier_map), (
-            "chatgpt-4o-latest (the demo log's dominant baseline) is not in the "
+        assert _is_rated_in_bundled_seed("gpt-5.5", tier_map), (
+            "gpt-5.5 (the demo log's dominant baseline) is not in the "
             "bundled quality seed (src/frugon/data/quality.json). "
             "Add it so the report can show an honest tier-drop disclosure."
         )

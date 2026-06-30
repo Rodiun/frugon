@@ -520,11 +520,11 @@ def _compute_span_days(records: list[LogRecord]) -> float | None:
 # "minimal quality step-down" to "maximum cost reduction" so the
 # recommendation is conservative.  Users can override with --candidates.
 _ROUTING_CANDIDATES = [
-    "gpt-4o",
-    "claude-3-5-sonnet-20241022",
-    "gpt-4o-mini",
-    "claude-3-5-haiku-20241022",
-    "claude-3-haiku-20240307",
+    "claude-sonnet-4-5",
+    "gpt-4.1",
+    "claude-haiku-4-5",
+    "gemini-2.5-flash",
+    "gpt-4.1-mini",
 ]
 
 def _get_model_tier(model: str) -> int:

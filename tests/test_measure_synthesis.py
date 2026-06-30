@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
+import frugon.cost as cost
 from frugon.cost import LogRecord
 from frugon.measure import (
     Comparison,
@@ -147,17 +148,27 @@ def test_tier1_synthesis_not_confirmed_when_candidate_loses(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     # Arrange — losses dominate the scored prompts. This test exercises the
-    # ESCALATION branch (a cheaper higher-tier "next rung up" exists), so PIN the
-    # tiers it needs rather than reading the live seed: gpt-4o (tier 0) is strictly
-    # above the failed gpt-4o-mini (tier 2) and below the gpt-4-turbo baseline
-    # (tier 3), and is the only routing-pool member that out-tiers the candidate —
-    # so next_rung_up resolves to gpt-4o deterministically, immune to re-anchors
-    # (which now place gpt-4o at the same tier as gpt-4o-mini and would dead-end).
+    # ESCALATION branch (a cheaper higher-tier "next rung up" exists), so PIN
+    # BOTH the quality tiers AND the routing pool to a fixed synthetic universe:
+    #
+    #   * Tiers: gpt-4o=0 (Elite), gpt-4o-mini=2 (Capable), gpt-4-turbo=3 (Efficient)
+    #   * Pool: ["gpt-4o"] — the only member that out-tiers the failed candidate
+    #
+    # Pinning the pool is the key drift-proofing step: next_rung_up reads
+    # cost._ROUTING_CANDIDATES when no explicit pool is passed.  The live list
+    # changes with each curation pass, which would break this test a third time.
+    # With pool=["gpt-4o"] wired in via monkeypatch, the escalation resolution
+    # is immune to future _ROUTING_CANDIDATES re-curation.
+    #
+    # gpt-4o is priced in the bundled seed at $2.5/1M input + $10/1M output
+    # (blended ~$6.25/1M), which is strictly cheaper than gpt-4-turbo's
+    # $10/1M + $30/1M (blended $20/1M) — so the escalation rung is valid.
     install_synthetic_quality(
         monkeypatch,
         tmp_path,
         {"gpt-4o": 0, "gpt-4o-mini": 2, "gpt-4-turbo": 3},
     )
+    monkeypatch.setattr(cost, "_ROUTING_CANDIDATES", ["gpt-4o"])
     result = MeasureResult(
         samples_requested=5,
         samples_taken=5,

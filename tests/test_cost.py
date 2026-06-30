@@ -990,13 +990,24 @@ class TestQualityTierRouting:
         Tiers are PINNED so the assertion binds to the REAL guard (the candidate
         stays within max_tier_drop of the baseline) rather than a frozen band
         literal — a leaderboard re-anchor that re-bands the routing pool can never
-        re-break it. With gpt-4-turbo (tier 3) baseline the conservative pool's
-        cheapest in-tolerance rated model is gpt-4o-mini (tier 2).
+        re-break it. With gpt-4-turbo (tier 3) baseline the pool's cheapest
+        in-tolerance rated model is gpt-4.1-mini (tier 2, within max_tier_drop=1).
+        Pool members not listed in the synthetic table resolve as UNRATED and are
+        excluded, so the table must include at least one new-pool member at tier ≤4.
         """
         install_synthetic_quality(
             monkeypatch,
             tmp_path,
-            {"gpt-4-turbo": 3, "gpt-4o": 0, "gpt-4o-mini": 2},
+            {
+                "gpt-4-turbo": 3,
+                "gpt-4o": 0,
+                # New pool members — must be present so the tier guard finds a candidate.
+                "claude-sonnet-4-5": 1,
+                "gpt-4.1": 1,
+                "claude-haiku-4-5": 1,
+                "gemini-2.5-flash": 0,
+                "gpt-4.1-mini": 2,
+            },
         )
 
         # Arrange — 25 gpt-4-turbo calls

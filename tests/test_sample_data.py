@@ -214,9 +214,9 @@ def test_fixture_lands_in_team_scale_register() -> None:
     total_saving_pct = baseline_reduction / result.total_cost * Decimal("100")
     assert Decimal("30") <= total_saving_pct <= Decimal("40")
 
-    # The split routes to gpt-4o-mini and keeps the hard calls on chatgpt-4o-latest.
-    assert split.baseline_model == "chatgpt-4o-latest"
-    assert split.candidate_model == "gpt-4o-mini"
+    # The split routes to gpt-4.1-mini and keeps the hard calls on gpt-5.5.
+    assert split.baseline_model == "gpt-5.5"
+    assert split.candidate_model == "gpt-4.1-mini"
     assert split.routed_count > 0
     assert split.kept_count > 0
 

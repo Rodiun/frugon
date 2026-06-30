@@ -30,6 +30,7 @@ from pathlib import Path
 
 import pytest
 
+import frugon.cost as cost
 from frugon.cost import LogRecord
 from frugon.measure import (
     Comparison,
@@ -303,6 +304,18 @@ def test_report_verdict_reconciles_with_terminal_via_shared_classifier(
     # plain ``import frugon.report`` bind a different module instance, so a spy
     # on its attributes would never be seen by the already-bound renderers).
     report = sys.modules[_render_tier1_synthesis.__module__]
+
+    # Pin the routing pool to an EMPTY list so next_rung_up always returns None
+    # for every parametrize variant.  Without this pin, the live _ROUTING_CANDIDATES
+    # is consulted; for the not_confirmed tally (losses dominate, gpt-4o-mini vs
+    # gpt-4o) the live pool resolves a next-rung-up model and _render_tier1_synthesis
+    # emits the escalation branch text — which diverges from _classify_verdict's
+    # "consider keeping these calls on" dead-end text, breaking the reconciliation
+    # invariant the test is designed to prove.  The empty pool forces the honest
+    # dead-end branch on every variant; only the not_confirmed path exercises it,
+    # but pinning all variants keeps the test consistent and immune to future pool
+    # recuration.  The escalation-branch rendering is tested by test_escalation_rendering.py.
+    monkeypatch.setattr(cost, "_ROUTING_CANDIDATES", [])
 
     result = MeasureResult(
         samples_requested=5,

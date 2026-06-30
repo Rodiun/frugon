@@ -65,8 +65,8 @@ def help_text(*args: str) -> str:
 FRUGON_TEST_UNRATED = "frugon-eval-unrated-x1"
 
 # $1 / $5 per million tokens (per-token Decimals, as strings). On the bundled
-# demo log (chatgpt-4o-latest baseline) this reproduces the priced-but-unrated
-# figures exactly: split saving 26.5%, full-dataset New-spend $286.5187.
+# demo log (gpt-5.5 baseline) this reproduces the priced-but-unrated
+# figures exactly: split saving 31.3%, full-dataset New-spend $376.913547.
 _SENTINEL_INPUT = "0.000001"
 _SENTINEL_OUTPUT = "0.000005"
 

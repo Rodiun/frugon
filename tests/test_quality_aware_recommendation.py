@@ -16,7 +16,7 @@ surfaces across terminal + Markdown + HTML.  It fires ONLY on confirmed + saves-
 more + was-excluded-for-being-unrated; never when it confirms-but-saves-less,
 fails quality, or was already the recommendation.
 
-These tests exercise the bundled demo log (``chatgpt-4o-latest`` baseline,
+These tests exercise the bundled demo log (``gpt-5.5`` baseline,
 ``gpt-4o`` rated candidate, ``frugon-eval-unrated-x1`` unrated) for the offline
 behaviour, and construct ``MeasureResult`` stubs directly for the promotion
 (fully offline — no provider call).
@@ -87,7 +87,7 @@ def _block(result: AnalysisResult) -> dict[str, CandidateProjection]:
 
 
 def test_explicit_candidates_headline_is_cheapest_rated() -> None:
-    """gpt-4o,frugon-eval-unrated-x1 on chatgpt-4o-latest demo: headline routes to rated gpt-4o."""
+    """gpt-4o,frugon-eval-unrated-x1 on gpt-5.5 demo: headline routes to rated gpt-4o."""
     result = _demo_result(["gpt-4o", "frugon-eval-unrated-x1"])
     assert result.candidate_model == "gpt-4o"
     assert result.split is not None
@@ -116,8 +116,12 @@ def test_excluded_unrated_caveat_present_with_real_saving_pct() -> None:
     )
     assert caveat is not None, messages
     assert "frugon-eval-unrated-x1" in caveat
-    # The percentage matches the unrated candidate's block saving% (26.5%).
-    assert "26.5%" in caveat
+    # The percentage matches the unrated candidate's block saving% (30.7%).
+    # Derived from _demo_result(["gpt-4o","frugon-eval-unrated-x1"]) with the
+    # gpt-5.5 baseline; updated when the demo baseline was modernised (gpt-5.5
+    # is pricier than the former gpt-4o baseline, raising the unrated candidate's
+    # apparent block saving from 26.5% to 30.7%).
+    assert "30.7%" in caveat
     # Only --judge yields the scored verdict that unlocks the model.
     assert "--measure --judge --candidates frugon-eval-unrated-x1" in caveat
     assert "unlock it as the recommendation" in caveat
@@ -255,7 +259,7 @@ def _measure(wins: int, losses: int = 0, ties: int = 0) -> MeasureResult:
     return MeasureResult(
         samples_requested=10,
         samples_taken=10,
-        current_model="chatgpt-4o-latest",
+        current_model="gpt-5.5",
         candidates=["frugon-eval-unrated-x1"],
         comparisons=[],
         tier1_tallies=[
