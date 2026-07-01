@@ -109,36 +109,54 @@ frugon analyze ./logs.jsonl     # see the cost breakdown and routing recommendat
 
 ```
 $ frugon analyze --demo
+
 ┌─ frugon · cost analysis ────────────────────────────────────────────────────┐
 │                                                                             │
-│   Analyzed      56,100 calls  ·  baseline chatgpt-4o-latest (your current   │
-│   model)                                                                    │
-│   Current spend $389.88 / mo                                                │
+│   Analyzed      56,100 calls  ·  baseline gpt-5.5 (your current model)      │
+│   Current spend $552.19 / mo                                                │
 │                                                                             │
-│     Route  36,100 easy calls (64.4%)  →  gpt-4o-mini   within tolerance     │
-│     Keep   10,000 hard calls (17.8%)  →  chatgpt-4o-latest                  │
-│     Keep   10,000 already on gpt-4o-mini (17.8%)   already optimal — no     │
+│     Route  36,100 easy calls (64.4%)  →  gpt-4.1-mini   within tolerance    │
+│     Keep   10,000 hard calls (17.8%)  →  gpt-5.5                            │
+│     Keep   10,000 already on gpt-4.1-mini (17.8%)   already optimal — no    │
 │   action                                                                    │
 │                                                                             │
-│   New spend     $254.10 / mo                                                │
+│   New spend     $356.40 / mo                                                │
 │                                                                             │
-│   SAVING        $135.78 / mo    ·    34.8% lower                            │
+│   SAVING        $195.79 / mo    ·    35.5% lower                            │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
+                                                                               
+  Candidates considered                                                        
+  claude-sonnet-4-5  $454.95 / mo  17.6% lower  considered                     
+  gpt-4.1            $408.62 / mo  26.0% lower  considered                     
+  claude-haiku-4-5   $380.55 / mo  31.1% lower  considered                     
+  gemini-2.5-flash   $359.08 / mo  35.0% lower  considered                     
+  gpt-4.1-mini       $356.40 / mo  35.5% lower  recommended                    
+  Each candidate is shown under the same quality-preserving split (easy calls  
+  to the candidate, hard calls kept on baseline); the cheapest split is the    
+  headline recommendation. Run --measure --judge to score each candidate's     
+  quality.                                                                     
 
-  Accounting   36,100 routed + 10,000 kept (chatgpt-4o-latest) + 10,000 already
-               on cheaper gpt-4o-mini  =  56,100 analyzed
-  Upper bound  a full swap to gpt-4o-mini saves ~96.3% — run with --verbose for
-               detail
-  Quality tier chatgpt-4o-latest: Strong  →  gpt-4o-mini: Capable   (LMArena)
+  Accounting   36,100 routed + 10,000 kept (gpt-5.5) + 10,000 already on 
+               cheaper gpt-4.1-mini  =  56,100 analyzed
+  Upper bound  a full swap to gpt-4.1-mini saves ~92.9% — run with --verbose 
+               for detail
+  Quality tier gpt-5.5: Elite  →  gpt-4.1-mini: Capable   (LMArena)
   Prices       synced 2026-06-18
-  Quality      synced 2026-06-24
+  Quality      synced 2026-06-30
 
 ⚠ Quality is not verified — 'within tolerance' is an offline estimate;
   run --measure to confirm it on your real outputs before you switch.
 
   Your data never leaves your machine. Your keys go to your own providers.
 → Route every call automatically and hold the saving:  https://frugon.rodiun.io
+
+Recommendations use a curated set of current top models across providers, drawn
+from OpenRouter usage rankings. Prices synced 2026-06-18 from the LiteLLM 
+registry. Run `frugon update` for the full live roster.
+This is bundled sample data with a fixed demo candidate set — run `frugon 
+analyze <your-logs>` for a recommendation on your own logs against the full 
+roster.
 ```
 
 Your numbers depend on your logs and your locally synced pricing/quality data.
@@ -179,8 +197,8 @@ Star the repo if this saved you money.
 ## Contributing
 
 Bug reports and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
-Frugon is deliberately small: five commands (`analyze`, `capture`, `models`,
-`pricing`, `quality`), three capabilities (cost analysis, quality visibility,
+Frugon is deliberately small: six commands (`analyze`, `capture`, `models`,
+`update`, `pricing`, `quality`), three capabilities (cost analysis, quality visibility,
 routing recommendation). Gateways, live routing proxies, web UIs, and
 multi-tenant accounts are out of scope by design.
 

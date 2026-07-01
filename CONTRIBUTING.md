@@ -62,7 +62,7 @@ A PR is not merged until all 12 combinations are green.
 
 Frugon is deliberately small, and the scope is locked. The user-facing surface is the
 `capture` and `analyze` commands plus the local-table helpers `models`, `pricing update`,
-and `quality update` — delivering **three capabilities**: cost analysis, quality
+`quality update`, and the combined `update` (refreshes both tables at once) — delivering **three capabilities**: cost analysis, quality
 visibility, and routing recommendation.
 
 The following are **out of scope** by design: gateway/proxy, live routing,

@@ -2,6 +2,19 @@
 
 ## Changelog
 
+### v0.2.0
+
+- **Curated recommendation roster.** The default candidate pool is now a
+  hand-picked set of current top models across providers — drawn from OpenRouter
+  usage rankings, each one both priced and quality-rated — so recommendations
+  reflect what teams run today rather than a stale list.
+- **New `frugon update`** — refresh the pricing and quality tables from their
+  public sources in one step (equivalent to `frugon pricing update` then
+  `frugon quality update`). No account, and nothing about your usage is sent
+  anywhere.
+- **Modernized `--demo`** — the bundled demo now reflects a current baseline and
+  recommendation, and names the data behind it.
+
 ### v0.1.3
 
 - Money totals now display at 2 decimal places (e.g. `$389.88` instead of
