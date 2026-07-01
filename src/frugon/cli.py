@@ -1093,9 +1093,12 @@ def analyze(
     # come from and how to refresh, without blocking output.
     # When --demo is active with no explicit --candidates, _DEMO_CANDIDATES is
     # passed so used_default_pool is False, but we still want the notice.
+    # Single-source the demo-default-pool predicate so the notice and the sample
+    # disclosure below can never drift apart (they gate on the same condition).
+    _demo_default_pool = demo and candidate_list is None
     _show_pool_notice = (
         result.split is not None or result.candidate_model is not None
-    ) and (result.used_default_pool or (demo and candidate_list is None))
+    ) and (result.used_default_pool or _demo_default_pool)
     if _show_pool_notice:
         import datetime as _dt
 
@@ -1112,6 +1115,17 @@ def analyze(
             f"providers, drawn from OpenRouter usage rankings. Prices synced {_date_str} "
             f"from the LiteLLM registry. Run `frugon update` for the full live roster."
             f"{_stale_suffix}[/dim]"
+        )
+
+    # Demo sample disclosure — the demo runs on bundled sample data against a
+    # fixed illustrative candidate set (not the full live roster a real run uses),
+    # so be explicit it's a sample and point at real-log analysis.  Keeps the
+    # demo's recommendation from being read as what every user would get.
+    if _demo_default_pool:
+        rprint(
+            "[dim]This is bundled sample data with a fixed demo candidate set — run "
+            "`frugon analyze <your-logs>` for a recommendation on your own logs "
+            "against the full roster.[/dim]"
         )
 
     # --- --measure: sample real prompts (must run BEFORE the report is written

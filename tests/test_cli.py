@@ -303,3 +303,32 @@ def test_analyze_demo_pool_notice_renders(monkeypatch: pytest.MonkeyPatch) -> No
     # The pool notice must appear whenever a split or candidate recommendation exists.
     # --demo consistently produces a recommendation from the bundled sample log.
     assert "Recommendations use a curated set" in result.output
+
+
+def test_analyze_demo_sample_disclosure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--demo discloses it is bundled sample data with a fixed candidate set.
+
+    The demo pins a fixed candidate pool, so its recommendation is illustrative —
+    not what a real run against the full roster yields.  The disclosure keeps that
+    honest and points the user at analysing their own logs.
+    """
+    result = runner.invoke(
+        app, ["analyze", "--demo", "--no-progress"], catch_exceptions=False
+    )
+    assert result.exit_code == 0, f"exited {result.exit_code}: {result.output}"
+    flat = " ".join(result.output.split())  # collapse Rich line-wrapping
+    assert "bundled sample data with a fixed demo candidate set" in flat
+    assert "your own logs" in flat
+
+
+def test_analyze_explicit_candidates_no_demo_disclosure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit --candidates run suppresses the demo-sample disclosure."""
+    result = runner.invoke(
+        app,
+        ["analyze", "--demo", "--no-progress", "--candidates", "gpt-4.1"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, f"exited {result.exit_code}: {result.output}"
+    assert "bundled sample data" not in " ".join(result.output.split())

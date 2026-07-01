@@ -18,9 +18,9 @@ personal dev log:
   * A minority are genuinely demanding calls — incident post-mortems, large
     multi-function reviews, long design-doc critiques, deep debugging — that the
     classifier KEEPS on the premium baseline.
-  * A slice of traffic is already running on ``claude-haiku-4-5`` (a team
-    part-way through an earlier migration) so the demo's accounting line reconciles
-    *every* call: routed + kept + already-on-cheaper == analyzed.
+  * A slice of traffic is already running on ``gpt-4.1-mini`` — the very model
+    frugon recommends (a team part-way through that migration) — so the demo's
+    accounting reconciles *every* call: routed + kept + already-on-cheaper == analyzed.
 
 Determinism (binding):
   The dataset is built by a fixed, seeded, deterministic procedure — corpus
@@ -356,8 +356,8 @@ HARD_SEEDS = [
 # Baseline: gpt-5.5 at $5/$30 per 1M tokens (Elite quality, tier 0).
 # Recommended candidate (the demo pool's cheapest rated model): gpt-4.1-mini —
 # a genuine quality-tier step-down with a compelling saving, exactly the coherent
-# story frugon is built to tell.  A separate slice of traffic is pre-migrated to
-# claude-haiku-4-5 (see N_CANDIDATE) so the accounting reconciles every call.
+# story frugon is built to tell.  A slice of traffic is already pre-migrated to
+# that same gpt-4.1-mini (see N_CANDIDATE) so the accounting reconciles every call.
 #
 # Total monthly spend lands in the hundreds-to-low-thousands register with an
 # honest 30-40% blended saving.  Per-call costs are uniform per seed-group
@@ -366,7 +366,7 @@ HARD_SEEDS = [
 # on every run and asserted by the test suite, so they can never silently drift.
 N_TURBO_EASY = 36100  # routine gpt-5.5 calls — frugon proposes routing these to gpt-4.1-mini
 N_TURBO_HARD = 10000  # genuinely hard gpt-5.5 calls — kept on baseline
-N_CANDIDATE = 10000  # a slice already migrated to claude-haiku-4-5 (not part of the split)
+N_CANDIDATE = 10000  # a slice already migrated to gpt-4.1-mini, the recommended model (not part of the split)
 
 WINDOW_DAYS = 30
 
@@ -475,7 +475,7 @@ def generate(output_path: Path) -> None:
     candidate_cycle: itertools.cycle[int] = itertools.cycle(range(len(EASY_SEEDS)))
     for _ in range(N_CANDIDATE):
         i = next(candidate_cycle)
-        plan.append((i, EASY_SEEDS[i], "claude-haiku-4-5"))
+        plan.append((i, EASY_SEEDS[i], "gpt-4.1-mini"))
 
     total = len(plan)
 
