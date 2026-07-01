@@ -239,3 +239,67 @@ def test_report_style_default_markdown_emits_no_notice(tmp_path: pathlib.Path) -
     assert result.exit_code == 0
     assert _V2_MD_NOTICE not in result.output
     assert out.exists()
+
+
+# ---------------------------------------------------------------------------
+# frugon update command
+# ---------------------------------------------------------------------------
+
+
+def test_update_command_invokes_both_updates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """frugon update calls both fetch_and_update_pricing and fetch_and_update_quality."""
+    mock_pricing = MagicMock(return_value={"models_synced": 5})
+    mock_quality = MagicMock(return_value={"models_synced": 10})
+    monkeypatch.setattr("frugon.pricing.fetch_and_update_pricing", mock_pricing)
+    monkeypatch.setattr("frugon.quality.fetch_and_update_quality", mock_quality)
+
+    result = runner.invoke(app, ["update"], catch_exceptions=False)
+
+    assert result.exit_code == 0, f"exited {result.exit_code}: {result.output}"
+    mock_pricing.assert_called_once()
+    mock_quality.assert_called_once()
+
+
+def test_update_command_pricing_failure_exits_1(monkeypatch: pytest.MonkeyPatch) -> None:
+    """frugon update exits 1 and prints error when pricing update fails."""
+    from frugon.pricing import PricingUpdateError
+
+    monkeypatch.setattr(
+        "frugon.pricing.fetch_and_update_pricing",
+        MagicMock(side_effect=PricingUpdateError("network timeout")),
+    )
+
+    result = runner.invoke(app, ["update"])
+
+    assert result.exit_code == 1
+    assert "pricing update failed" in result.output
+
+
+def test_update_command_quality_failure_exits_1(monkeypatch: pytest.MonkeyPatch) -> None:
+    """frugon update exits 1 when quality update fails after pricing succeeds."""
+    from frugon.quality import QualityUpdateError
+
+    monkeypatch.setattr(
+        "frugon.pricing.fetch_and_update_pricing",
+        MagicMock(return_value={"models_synced": 5}),
+    )
+    monkeypatch.setattr(
+        "frugon.quality.fetch_and_update_quality",
+        MagicMock(side_effect=QualityUpdateError("HF unavailable")),
+    )
+
+    result = runner.invoke(app, ["update"])
+
+    assert result.exit_code == 1
+    assert "quality update failed" in result.output
+
+
+def test_analyze_demo_pool_notice_renders(monkeypatch: pytest.MonkeyPatch) -> None:
+    """frugon analyze --demo renders the pool notice when a recommendation is made."""
+    result = runner.invoke(
+        app, ["analyze", "--demo", "--no-progress"], catch_exceptions=False
+    )
+    assert result.exit_code == 0, f"exited {result.exit_code}: {result.output}"
+    # The pool notice must appear whenever a split or candidate recommendation exists.
+    # --demo consistently produces a recommendation from the bundled sample log.
+    assert "Recommendations use a curated set" in result.output

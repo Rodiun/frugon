@@ -13,13 +13,13 @@ personal dev log:
     over a one-month window.
   * The bulk are routine, short calls — classification, routing, Q&A, short
     summaries, translations — that frugon's per-call difficulty classifier marks
-    EASY and proposes routing to ``claude-haiku-4-5`` (Strong tier; $1 / $5
-    per 1M tokens) — a genuine quality-tier step-down with a compelling saving.
+    EASY and proposes routing to the demo pool's cheapest rated candidate,
+    ``gpt-4.1-mini`` — a genuine quality-tier step-down with a compelling saving.
   * A minority are genuinely demanding calls — incident post-mortems, large
     multi-function reviews, long design-doc critiques, deep debugging — that the
     classifier KEEPS on the premium baseline.
-  * A slice of traffic is already running on the cheaper ``claude-haiku-4-5`` (a
-    team part-way through a migration) so the demo's accounting line reconciles
+  * A slice of traffic is already running on ``claude-haiku-4-5`` (a team
+    part-way through an earlier migration) so the demo's accounting line reconciles
     *every* call: routed + kept + already-on-cheaper == analyzed.
 
 Determinism (binding):
@@ -142,7 +142,8 @@ def _count_tokens(text: str, model: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# EASY corpus — short, routine calls the classifier routes to gpt-4o-mini.
+# EASY corpus — short, routine calls the classifier proposes routing to the
+# cheaper demo pick (gpt-4.1-mini).
 #
 # These are real, realistic support / assistant tasks.  Each is padded to a
 # fixed, modest target size that keeps the difficulty score below the easy
@@ -353,18 +354,19 @@ HARD_SEEDS = [
 # saving and a total "Current" that equals the sum of the per-model cost rows.
 #
 # Baseline: gpt-5.5 at $5/$30 per 1M tokens (Elite quality, tier 0).
-# Candidate: claude-haiku-4-5 at $1/$5 per 1M tokens (Strong quality, tier 1).
-# This is a genuine tier-0 → tier-1 step-down (tier_drop = 1) with a compelling
-# ~5x input-price reduction — exactly the coherent story frugon is built to tell.
+# Recommended candidate (the demo pool's cheapest rated model): gpt-4.1-mini —
+# a genuine quality-tier step-down with a compelling saving, exactly the coherent
+# story frugon is built to tell.  A separate slice of traffic is pre-migrated to
+# claude-haiku-4-5 (see N_CANDIDATE) so the accounting reconciles every call.
 #
 # Total monthly spend lands in the hundreds-to-low-thousands register with an
 # honest 30-40% blended saving.  Per-call costs are uniform per seed-group
 # (deterministic padding), so these counts pin the totals precisely.  The exact
 # routed/kept/blended/saving figures are printed by _report_stats from the engine
 # on every run and asserted by the test suite, so they can never silently drift.
-N_TURBO_EASY = 36100  # routine gpt-5.5 calls — routed to claude-haiku-4-5
+N_TURBO_EASY = 36100  # routine gpt-5.5 calls — frugon proposes routing these to gpt-4.1-mini
 N_TURBO_HARD = 10000  # genuinely hard gpt-5.5 calls — kept on baseline
-N_CANDIDATE = 10000  # already migrated to the cheaper claude-haiku-4-5 (not part of the split)
+N_CANDIDATE = 10000  # a slice already migrated to claude-haiku-4-5 (not part of the split)
 
 WINDOW_DAYS = 30
 
@@ -407,7 +409,7 @@ def _make_record(seed: dict, model: str, ts: str) -> dict:
         counts = tokencost.calculate_all_costs_and_tokens(messages, completion, model)
         prompt_tokens = int(counts["prompt_tokens"])
         completion_tokens = int(counts["completion_tokens"])
-    except (KeyError, Exception):
+    except (KeyError, ValueError):
         # Fallback for models not in tokencost's registry: count via cl100k_base.
         prompt_tokens = _count_message_tokens(messages, _TOKENCOST_FALLBACK_MODEL)
         completion_tokens = _count_tokens(completion, _TOKENCOST_FALLBACK_MODEL)
@@ -522,15 +524,18 @@ def generate(output_path: Path) -> None:
 def _report_stats(records: list[dict]) -> None:
     """Print the honest split + wholesale figures from the REAL frugon engine.
 
-    Uses frugon.cost.analyze_records so the printed routed/kept/blended/saving
-    figures are exactly what `frugon analyze --demo` renders — no hand-maintained
-    arithmetic that could drift from the engine.
+    Uses frugon.cost.analyze_records with the demo candidate pool (the same pool
+    `frugon analyze --demo` pins), so the printed candidate and figures come from
+    the same analysis that backs the demo — no hand-maintained arithmetic that
+    could drift from the engine.  These are the engine's raw split fields; the
+    demo's displayed dollars are reconciled to 2dp (per the §2a reconciling
+    invariant), so a printed figure can round a hair differently from the demo.
     """
-    from frugon.cost import analyze_records, compute_saving_pct, parse_record
+    from frugon.cost import _DEMO_CANDIDATES, analyze_records, compute_saving_pct, parse_record
 
     parsed = [parse_record(r) for r in records]
     log_records = [r for r in parsed if r is not None]
-    result = analyze_records(log_records)
+    result = analyze_records(log_records, candidates=_DEMO_CANDIDATES)
 
     print(
         f"Analyzed {result.priced_calls} priced calls; "

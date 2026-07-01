@@ -40,6 +40,15 @@ def _is_rated_in_bundled_seed(model: str, tier_map: dict[str, int]) -> bool:
     return base in tier_map
 
 
+_BUNDLED_PRICING: Path = Path(frugon.__file__).parent / "data" / "pricing.json"
+
+
+def _load_bundled_pricing_keys() -> set[str]:
+    """Return the set of model keys in the bundled pricing seed."""
+    raw = json.loads(_BUNDLED_PRICING.read_text(encoding="utf-8"))
+    return {k for k in raw if not k.startswith("_")}
+
+
 class TestDefaultCandidatePoolIsRated:
     def test_all_pool_members_are_rated_in_bundled_seed(self) -> None:
         tier_map = _load_bundled_tier_map()
@@ -59,4 +68,51 @@ class TestDefaultCandidatePoolIsRated:
             "gpt-5.5 (the demo log's dominant baseline) is not in the "
             "bundled quality seed (src/frugon/data/quality.json). "
             "Add it so the report can show an honest tier-drop disclosure."
+        )
+
+    def test_routing_candidates_has_10_members(self) -> None:
+        assert len(_ROUTING_CANDIDATES) == 10, (
+            f"Expected 10 routing candidates, got {len(_ROUTING_CANDIDATES)}: "
+            f"{_ROUTING_CANDIDATES}"
+        )
+
+    def test_all_routing_candidates_are_priced(self) -> None:
+        priced_keys = _load_bundled_pricing_keys()
+        unpriced = [m for m in _ROUTING_CANDIDATES if m not in priced_keys]
+        assert unpriced == [], (
+            f"Routing candidate(s) not in bundled pricing seed: {unpriced}. "
+            "Every candidate must be priced so frugon can project costs."
+        )
+
+
+class TestDemoCandidatePool:
+    def test_demo_candidates_pool_is_subset_of_priced_and_rated(self) -> None:
+        from frugon.cost import _DEMO_CANDIDATES
+
+        tier_map = _load_bundled_tier_map()
+        priced_keys = _load_bundled_pricing_keys()
+        unrated = [m for m in _DEMO_CANDIDATES if not _is_rated_in_bundled_seed(m, tier_map)]
+        unpriced = [m for m in _DEMO_CANDIDATES if m not in priced_keys]
+        assert unrated == [], (
+            f"Demo pool contains unrated model(s): {unrated}. "
+            "All demo candidates must be rated in the bundled quality seed."
+        )
+        assert unpriced == [], (
+            f"Demo pool contains unpriced model(s): {unpriced}. "
+            "All demo candidates must be priced in the bundled pricing seed."
+        )
+
+    def test_demo_candidates_unchanged(self) -> None:
+        from frugon.cost import _DEMO_CANDIDATES
+
+        assert _DEMO_CANDIDATES == [
+            "claude-sonnet-4-5",
+            "gpt-4.1",
+            "claude-haiku-4-5",
+            "gemini-2.5-flash",
+            "gpt-4.1-mini",
+        ], (
+            "Pinning test: _DEMO_CANDIDATES changed unexpectedly. "
+            "Changing the demo pool will alter committed demo numbers. "
+            "Update this test and regenerate the demo GIF if this is intentional."
         )

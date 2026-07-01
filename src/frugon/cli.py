@@ -932,10 +932,11 @@ def analyze(
             # verify here is the key the sampled model needs.  None when no rated,
             # priced, strictly-cheaper candidate exists — the backstop covers
             # that residual case.
-            from frugon.cost import _ROUTING_CANDIDATES
+            from frugon.cost import _DEMO_CANDIDATES, _ROUTING_CANDIDATES
             from frugon.routing import select_easy_target
 
-            recommended = select_easy_target(_dominant_model, _ROUTING_CANDIDATES)
+            _active_pool = _DEMO_CANDIDATES if demo else _ROUTING_CANDIDATES
+            recommended = select_easy_target(_dominant_model, _active_pool)
             if recommended:
                 precheck_models.append(recommended)
         if judge:
@@ -1024,11 +1025,20 @@ def analyze(
                 f"{len(analysis_records):,} records — this may take a moment."
             )
 
+        # When --demo is active and no explicit --candidates were supplied, pin
+        # the demo pool so the demo recommendation and its dollar figures stay
+        # numerically stable as _ROUTING_CANDIDATES evolves over time.
+        _effective_candidates: list[str] | None = candidate_list
+        if demo and candidate_list is None:
+            from frugon.cost import _DEMO_CANDIDATES
+
+            _effective_candidates = _DEMO_CANDIDATES
+
         with progress.bar("Pricing", total=len(analysis_records)) as pricing_task, Stopwatch() as sw:
             result = analyze_records(
                 analysis_records,
                 window_days=window,
-                candidates=candidate_list,
+                candidates=_effective_candidates,
                 skipped_malformed=analysis_skipped,
                 split_routing=not wholesale,
                 progress_cb=lambda done, total: pricing_task.advance(1),
@@ -1077,6 +1087,32 @@ def analyze(
             else frozenset()
         ),
     )
+
+    # Pool notice — shown whenever a recommendation was made and the default pool
+    # was used (not an explicit --candidates run).  Tells the user where prices
+    # come from and how to refresh, without blocking output.
+    # When --demo is active with no explicit --candidates, _DEMO_CANDIDATES is
+    # passed so used_default_pool is False, but we still want the notice.
+    _show_pool_notice = (
+        result.split is not None or result.candidate_model is not None
+    ) and (result.used_default_pool or (demo and candidate_list is None))
+    if _show_pool_notice:
+        import datetime as _dt
+
+        from frugon.pricing import is_pricing_stale
+
+        _pls = result.pricing_json_last_synced
+        _stale_suffix = ""
+        if _pls and is_pricing_stale(_pls):
+            _days_old = (_dt.date.today() - _dt.date.fromisoformat(_pls)).days
+            _stale_suffix = f" — {_days_old} days old; run `frugon update`"
+        _date_str = _pls or "unknown"
+        rprint(
+            f"[dim]Recommendations use a curated set of current top models across "
+            f"providers, drawn from OpenRouter usage rankings. Prices synced {_date_str} "
+            f"from the LiteLLM registry. Run `frugon update` for the full live roster."
+            f"{_stale_suffix}[/dim]"
+        )
 
     # --- --measure: sample real prompts (must run BEFORE the report is written
     # so the report can carry the quality verdict) ---------------------------
@@ -1457,6 +1493,78 @@ def quality_update() -> None:
         f"dated [cyan]{date.today().isoformat()}[/cyan]."
     )
     rprint("[dim]Quality tiers from LMArena (lmarena-ai/leaderboard-dataset, CC-BY-4.0).[/dim]")
+    rprint(f"[dim]{PRIVACY_LINE}[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# update command — runs pricing update AND quality update in one step
+# ---------------------------------------------------------------------------
+@app.command()
+def update() -> None:
+    """Refresh both the pricing table and quality tier table from upstream sources.
+
+    Equivalent to running [cyan]frugon pricing update[/cyan] followed by
+    [cyan]frugon quality update[/cyan] in one step.
+
+    No account required. No data sent about your usage.
+
+    [dim]Your data never leaves your machine.[/dim]
+    """
+    from datetime import date
+
+    from frugon._progress import progress_reporter
+    from frugon.pricing import (
+        _LITELLM_REGISTRY_URL,
+        _PRICING_JSON,
+        PricingUpdateError,
+        fetch_and_update_pricing,
+    )
+    from frugon.quality import (
+        _HF_BASE_URL,
+        _QUALITY_JSON,
+        QualityUpdateError,
+        fetch_and_update_quality,
+    )
+
+    today = date.today().isoformat()
+
+    # --- Pricing ---
+    try:
+        with progress_reporter(no_progress=False) as progress:
+            with progress.spinner("Updating pricing table…"):
+                pricing_result = fetch_and_update_pricing(
+                    registry_url=_LITELLM_REGISTRY_URL,
+                    output_path=_PRICING_JSON,
+                    today_date_str=today,
+                )
+    except PricingUpdateError as exc:
+        rprint(f"[red]pricing update failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    rprint(
+        f"[bold green]✓[/bold green] pricing.json updated — "
+        f"[bold]{pricing_result['models_synced']}[/bold] models, "
+        f"dated [cyan]{today}[/cyan]."
+    )
+
+    # --- Quality ---
+    try:
+        with progress_reporter(no_progress=False) as progress:
+            with progress.spinner("Updating quality table…"):
+                quality_result = fetch_and_update_quality(
+                    hf_base_url=_HF_BASE_URL,
+                    output_path=_QUALITY_JSON,
+                    today_date_str=today,
+                )
+    except QualityUpdateError as exc:
+        rprint(f"[red]quality update failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    rprint(
+        f"[bold green]✓[/bold green] quality.json updated — "
+        f"[bold]{quality_result['models_synced']}[/bold] models, "
+        f"dated [cyan]{today}[/cyan]."
+    )
     rprint(f"[dim]{PRIVACY_LINE}[/dim]")
 
 

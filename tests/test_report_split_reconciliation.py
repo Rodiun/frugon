@@ -36,7 +36,7 @@ from typing import Any
 import pytest
 
 import frugon
-from frugon.cost import AnalysisResult, analyze_records, iter_records
+from frugon.cost import _DEMO_CANDIDATES, AnalysisResult, analyze_records, iter_records
 from frugon.report import (
     _split_report_figures,
     render_html,
@@ -58,6 +58,7 @@ def _demo_result() -> AnalysisResult:
         records,
         skipped_malformed=skipped,
         split_routing=True,
+        candidates=_DEMO_CANDIDATES,
     )
 
 

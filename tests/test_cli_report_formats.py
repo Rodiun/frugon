@@ -27,7 +27,7 @@ import pytest
 from typer.testing import CliRunner
 
 from frugon.cli import app
-from frugon.cost import analyze_records, iter_records
+from frugon.cost import _DEMO_CANDIDATES, analyze_records, iter_records
 from frugon.report import (
     render_html,
     render_html_v2,
@@ -307,7 +307,8 @@ def test_cli_env_var_full_set_matches_single_renders(
     sample = pathlib.Path(frugon.__file__).parent / "data" / "sample_logs.jsonl.gz"
     records, skipped = iter_records(sample)
     result = analyze_records(
-        list(records), skipped_malformed=skipped, split_routing=True
+        list(records), skipped_malformed=skipped, split_routing=True,
+        candidates=_DEMO_CANDIDATES,
     )
     renderer = {
         ".md": render_markdown_v2,

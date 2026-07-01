@@ -327,20 +327,29 @@ def test_default_measured_candidate_is_split_recommendation(
     """No --candidates: --measure samples split.candidate_model, not the wholesale pick.
 
     The dominant baseline is gpt-4-turbo with easy calls; the split routes those
-    easy calls to a cheaper rated candidate (gpt-4o-mini).  --measure must sample
-    that recommended candidate so it verifies the actual switch frugon proposes.
+    easy calls to a cheaper rated candidate from the default pool.  --measure must
+    sample that recommended candidate so it verifies the actual switch frugon proposes.
     """
     # Arrange
     monkeypatch.setattr(measure, "_import_litellm", lambda: object())
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")  # for the gpt-4-turbo baseline
     log = _write_log(tmp_path / "log.jsonl", [_heavy_row("gpt-4-turbo") for _ in range(6)])
     captured = _capture_run_measure(monkeypatch)
 
-    # Sanity: the split must actually recommend gpt-4.1-mini for this log.
+    # Sanity: the split recommends a real, strictly-cheaper candidate drawn from
+    # the default routing pool.  The exact model tracks the curated roster, so
+    # derive it rather than pin a brittle literal.
     result = cost.analyze_logs(log)
     assert result.split is not None, "expected a split recommendation for this log"
     recommended = result.split.candidate_model
-    assert recommended == "gpt-4.1-mini", recommended
+    assert recommended in cost._ROUTING_CANDIDATES, recommended
+    assert recommended != "gpt-4-turbo", recommended
+
+    # The recommendation may be cross-provider (e.g. a Gemini or Anthropic model),
+    # so provide the key it needs — otherwise the precheck would block --measure.
+    _needed_key = measure._required_key_for_model(recommended)
+    if _needed_key:
+        monkeypatch.setenv(_needed_key, "sk-test-not-real")
 
     # Act
     invoke = runner.invoke(
@@ -383,14 +392,19 @@ def test_precheck_panel_names_recommended_candidate(
 ) -> None:
     """The missing-key panel references the recommended candidate (proof of GAP 1).
 
-    Both gpt-4-turbo and gpt-4.1-mini need OPENAI_API_KEY, so the var alone does
-    not reveal which candidate is checked.  The panel must name gpt-4.1-mini so
-    the user can see the key is for the switch frugon recommends.
+    The panel must name the recommended candidate — not just the missing env var —
+    so the user can see which switch frugon proposes.  The candidate is derived
+    from the default pool so this tracks the curated roster.
     """
     # Arrange — extra importable, key absent → the friendly panel fires.
     monkeypatch.setattr(measure, "_import_litellm", lambda: object())
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     log = _write_log(tmp_path / "log.jsonl", [_heavy_row("gpt-4-turbo") for _ in range(6)])
+    # Derive the recommended candidate from the default pool so the assertion
+    # tracks the curated roster instead of a brittle literal.
+    _split = cost.analyze_logs(log).split
+    assert _split is not None, "expected a split recommendation for this log"
+    recommended = _split.candidate_model
 
     # Act
     invoke = runner.invoke(
@@ -401,7 +415,7 @@ def test_precheck_panel_names_recommended_candidate(
     assert invoke.exit_code == 1, invoke.output
     out = _clean(invoke.output)
     assert "Traceback" not in out, out
-    assert "gpt-4.1-mini" in out, f"recommended candidate not named in panel:\n{out}"
+    assert recommended in out, f"recommended candidate not named in panel:\n{out}"
 
 
 # ---------------------------------------------------------------------------

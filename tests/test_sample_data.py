@@ -28,7 +28,7 @@ from typing import Any
 import pytest
 import tokencost  # type: ignore[import-untyped]
 
-from frugon.cost import analyze_records, parse_record
+from frugon.cost import _DEMO_CANDIDATES, analyze_records, parse_record
 
 # ---------------------------------------------------------------------------
 # Locate + load the bundled (gzip-compressed) sample file
@@ -168,7 +168,7 @@ def test_fixture_generation_is_byte_deterministic(tmp_path: Path) -> None:
 
 def _analyze_fixture() -> Any:
     records = [r for r in (parse_record(raw) for raw in _RECORDS) if r is not None]
-    return analyze_records(records)
+    return analyze_records(records, candidates=_DEMO_CANDIDATES)
 
 
 def test_fixture_accounting_reconciles_every_call() -> None:

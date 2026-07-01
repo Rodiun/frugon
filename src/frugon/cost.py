@@ -520,6 +520,25 @@ def _compute_span_days(records: list[LogRecord]) -> float | None:
 # "minimal quality step-down" to "maximum cost reduction" so the
 # recommendation is conservative.  Users can override with --candidates.
 _ROUTING_CANDIDATES = [
+    # Tier 0 — Elite (minimal quality step-down from typical baselines)
+    "claude-sonnet-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "deepseek-v4-pro",
+    "gpt-5.5",
+    # Tier 1 — Strong (meaningful cost reduction, still high quality)
+    "deepseek-v3.2",
+    "deepseek-v4-flash",
+    "gemini-2.5-flash",
+    "minimax-m3",
+    # Tier 2 — Capable (maximum cost reduction)
+    "claude-haiku-4-5",
+]
+
+# Pinned demo candidate pool — keeps the --demo recommendation and every
+# committed demo number numerically identical as the default pool evolves.
+# --demo --measure stays single-OpenAI-key.  Real users get the 10-model pool.
+_DEMO_CANDIDATES: list[str] = [
     "claude-sonnet-4-5",
     "gpt-4.1",
     "claude-haiku-4-5",

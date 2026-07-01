@@ -649,12 +649,11 @@ def test_analyze_demo_default_pool_disclosure_printed() -> None:
 
     assert result.exit_code == 0
     out = _clean(result.output)
-    assert "built-in candidates" in out, (
-        f"Expected default-pool disclosure in output:\n{result.output}"
+    assert "curated set" in out, (
+        f"Expected pool notice in output:\n{result.output}"
     )
-    # The disclosure points the user at --candidates as the override.
-    assert "--candidates" in out, (
-        f"Expected --candidates override hint in pool disclosure:\n{result.output}"
+    assert "frugon update" in out, (
+        f"Expected 'frugon update' pointer in pool notice:\n{result.output}"
     )
 
 
@@ -687,7 +686,7 @@ def test_analyze_explicit_candidates_no_default_pool_disclosure(
 
     assert result.exit_code == 0, f"Expected exit 0:\n{result.output}"
     out = _clean(result.output)
-    assert "built-in candidates" not in out, (
+    assert "curated set" not in out, (
         f"Default-pool disclosure must NOT appear when --candidates is used:\n{result.output}"
     )
 
