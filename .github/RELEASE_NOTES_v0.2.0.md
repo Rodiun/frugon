@@ -16,5 +16,5 @@ Recommendations now track the models developers actually use. The routing pool i
 ## Install / upgrade
 
 ```bash
-pipx upgrade frugon        # or:  pip install -U frugon  /  uvx frugon@latest
+uvx frugon@latest          # or:  uv tool upgrade frugon  /  pipx upgrade frugon  /  pip install -U frugon
 ```

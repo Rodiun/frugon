@@ -90,7 +90,7 @@ gracefully.
 ### 5-minute path from install to first analysis
 
 ```bash
-pip install frugon              # or: pipx install frugon / uvx frugon
+uv tool install frugon          # or: pipx install frugon / pip install frugon
 frugon capture --out ./logs.jsonl &   # start the proxy in the background
 # ... run your app, make some LLM calls ...
 frugon analyze ./logs.jsonl     # see the cost breakdown and routing recommendation
