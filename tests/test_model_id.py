@@ -356,3 +356,266 @@ class TestBaseFamily:
         from frugon.model_id import base_family
 
         base_family("gpt-4o-2024-08-06")  # must not raise
+
+    # -----------------------------------------------------------------------
+    # Part B — date/version-fold extensions (three-digit version, compact
+    # MMDD, MM-YYYY, YYYY-MM, two-digit MM-DD)
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        ("model", "expected"),
+        [
+            # --- Three-digit leading-zero version (-0NN) ---
+            ("gemini-2.0-flash-001", "gemini-2.0-flash"),
+            ("gemini-2.0-flash-002", "gemini-2.0-flash"),
+            ("gemini-1.5-pro-001", "gemini-1.5-pro"),
+            ("gemini-1.5-flash-8b-001", "gemini-1.5-flash-8b"),
+            # --- Compact month-day (-MMDD), MM validated 01-12 ---
+            ("grok-4-0709", "grok-4"),
+            ("athene-70b-0725", "athene-70b"),
+            ("deepseek-r1-0528", "deepseek-r1"),
+            ("glm-4-0520", "glm-4"),
+            ("ernie-5.0-preview-1022", "ernie-5.0-preview"),
+            ("ernie-5.0-0110", "ernie-5.0"),
+            # --- YYMM-style ending is NOT a valid MMDD (month "25") — no-op ---
+            ("qwen3-235b-a22b-thinking-2507", "qwen3-235b-a22b-thinking-2507"),
+            ("qwen3-30b-a3b-instruct-2507", "qwen3-30b-a3b-instruct-2507"),
+            # --- Month-year (-MM-YYYY) ---
+            ("command-r-08-2024", "command-r"),
+            ("command-r-plus-08-2024", "command-r-plus"),
+            ("command-a-03-2025", "command-a"),
+            # --- Year-month (-YYYY-MM) ---
+            ("some-model-2025-09", "some-model"),
+            ("some-model-2024-12", "some-model"),
+            # --- Two-digit month-day (-MM-DD), both sides exactly 2 digits ---
+            ("amazon-nova-experimental-chat-10-09", "amazon-nova-experimental-chat"),
+            ("amazon-nova-experimental-chat-10-20", "amazon-nova-experimental-chat"),
+            ("amazon-nova-experimental-chat-11-10", "amazon-nova-experimental-chat"),
+            # Only the trailing MM-DD pair is stripped; a leading 2-digit
+            # group (here "26", a truncated year) is left in place.
+            ("amazon-nova-experimental-chat-26-01-10", "amazon-nova-experimental-chat-26"),
+        ],
+    )
+    def test_base_family_part_b_folds(self, model: str, expected: str) -> None:
+        """Arrange: real bundled-seed-shaped model IDs carrying a date/version
+        pin in one of the five new forms.
+        Act: base_family(model).
+        Assert: the trailing pin is stripped to the bare family name.
+        """
+        from frugon.model_id import base_family
+
+        assert base_family(model) == expected, (
+            f"base_family({model!r}) -> {base_family(model)!r}, want {expected!r}"
+        )
+
+    @pytest.mark.parametrize(
+        ("model"),
+        [
+            # --- Parameter counts: never folded ---
+            "llama-3.1-405b-instruct",
+            "mixtral-8x7b-instruct-v0.1",
+            "mixtral-8x22b-instruct-v0.1",
+            "athene-70b",
+            "gpt-oss-120b",
+            "gpt-oss-20b",
+            "alpaca-13b",
+            # --- Single-digit dotted minor-version pairs must never match
+            #     the two-digit MM-DD rule ---
+            "claude-haiku-4-5",
+            "claude-opus-4-5",
+            "claude-opus-4-6",
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-sonnet-4-5",
+            "claude-sonnet-4-6",
+            # --- YYMM-style ending is not a valid MMDD (month 25) ---
+            "qwen3-235b-a22b-thinking-2507",
+        ],
+    )
+    def test_base_family_part_b_no_fold_counterexamples(self, model: str) -> None:
+        """Arrange: real model IDs whose trailing digits must NEVER be folded
+        (parameter counts, single-digit dotted minor versions).
+        Act: base_family(model).
+        Assert: returned unchanged.
+        """
+        from frugon.model_id import base_family
+
+        assert base_family(model) == model, (
+            f"base_family({model!r}) -> {base_family(model)!r}, want unchanged"
+        )
+
+    def test_base_family_part_b_idempotent_over_fixtures(self) -> None:
+        """Arrange: every Part B fixture (fold + no-fold) plus existing
+        Part A/pre-existing fixtures.
+        Act: base_family(base_family(x)).
+        Assert: idempotent for every fixture (property-style check).
+        """
+        from frugon.model_id import base_family
+
+        fixtures = [
+            "gemini-2.0-flash-001",
+            "grok-4-0709",
+            "athene-70b-0725",
+            "deepseek-r1-0528",
+            "command-r-08-2024",
+            "command-r-plus-08-2024",
+            "some-model-2025-09",
+            "amazon-nova-experimental-chat-10-09",
+            "amazon-nova-experimental-chat-26-01-10",
+            "llama-3.1-405b-instruct",
+            "mixtral-8x7b-instruct-v0.1",
+            "claude-haiku-4-5",
+            "claude-opus-4-8",
+            "qwen3-235b-a22b-thinking-2507",
+            "gpt-4o-2024-08-06",
+            "claude-3-5-sonnet-20241022",
+            "mistral-large-latest",
+            "claude-3-5-sonnet-20241022:beta",
+        ]
+        for model in fixtures:
+            once = base_family(model)
+            twice = base_family(once)
+            assert once == twice, (
+                f"base_family not idempotent for {model!r}: "
+                f"first={once!r}, second={twice!r}"
+            )
+
+    def test_base_family_part_b_pure_no_io(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Assert the extended base_family() still makes no network I/O."""
+        import socket
+
+        def _no_network(*args: object, **kwargs: object) -> None:
+            raise AssertionError("base_family() must not make network calls")
+
+        monkeypatch.setattr(socket, "socket", _no_network)
+
+        from frugon.model_id import base_family
+
+        base_family("grok-4-0709")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# effort_family()
+# ---------------------------------------------------------------------------
+
+
+class TestEffortFamily:
+    """Table-driven tests for effort_family() — quality-lookup-only fold."""
+
+    @pytest.mark.parametrize(
+        ("model", "expected"),
+        [
+            # --- Real bundled-seed effort-variant keys ---
+            ("gpt-5-high", "gpt-5"),
+            ("gpt-5-mini-high", "gpt-5-mini"),
+            ("gpt-5-nano-high", "gpt-5-nano"),
+            ("gpt-5.1-high", "gpt-5.1"),
+            ("gpt-5.4-mini-high", "gpt-5.4-mini"),
+            ("o3-mini-high", "o3-mini"),
+            ("grok-3-mini-high", "grok-3-mini"),
+            ("claude-opus-4-8-thinking", "claude-opus-4-8"),
+            ("claude-opus-4-6-thinking", "claude-opus-4-6"),
+            ("deepseek-v3.1-thinking", "deepseek-v3.1"),
+            ("qwen3-next-80b-a3b-thinking", "qwen3-next-80b-a3b"),
+            ("qwen3-235b-a22b-no-thinking", "qwen3-235b-a22b"),
+            # --- Every effort suffix, generically ---
+            ("model-high", "model"),
+            ("model-medium", "model"),
+            ("model-low", "model"),
+            ("model-minimal", "model"),
+            ("model-thinking", "model"),
+            ("model-no-thinking", "model"),
+            # --- Case-insensitive suffix matching ---
+            ("model-HIGH", "model"),
+            ("model-Thinking", "model"),
+            # --- Stacked "-no-thinking" folds as ONE suffix, not "-no" left over ---
+            ("x-no-thinking", "x"),
+            ("qwen3-vl-235b-thinking-no-thinking", "qwen3-vl-235b-thinking"),
+        ],
+    )
+    def test_effort_family_folds(self, model: str, expected: str) -> None:
+        """Arrange: model string carrying a trailing effort suffix.
+        Act: effort_family(model).
+        Assert: the suffix is stripped exactly once.
+        """
+        from frugon.model_id import effort_family
+
+        assert effort_family(model) == expected, (
+            f"effort_family({model!r}) -> {effort_family(model)!r}, want {expected!r}"
+        )
+
+    @pytest.mark.parametrize(
+        ("model"),
+        [
+            # --- Size/SKU suffixes: genuinely different models, never folded ---
+            "gpt-5-mini",
+            "gpt-5-nano",
+            "gpt-4.1-mini",
+            "gpt-4.1-nano",
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash-lite",
+            "claude-opus-4-plus",
+            "grok-3-mini",
+            "command-r-plus",
+            "gpt-4o-chat",
+            "some-model-instant",
+            "some-model-fast",
+            # --- No trailing effort token at all ---
+            "gpt-5",
+            "claude-opus-4-8",
+            # --- Suffix present but NOT at the end of the string ---
+            "thinking-cap-model",
+            "high-roller-model",
+        ],
+    )
+    def test_effort_family_no_fold_counterexamples(self, model: str) -> None:
+        """Arrange: model IDs whose trailing token is a SKU/size suffix, or
+        that carry no recognised effort suffix at all, or where the
+        substring appears but not as a trailing token.
+        Act: effort_family(model).
+        Assert: returned unchanged.
+        """
+        from frugon.model_id import effort_family
+
+        assert effort_family(model) == model, (
+            f"effort_family({model!r}) -> {effort_family(model)!r}, want unchanged"
+        )
+
+    def test_effort_family_medium_is_ambiguous_by_design(self) -> None:
+        """'-medium' is a genuine reasoning-effort level (o3-mini-medium
+        style) AND, coincidentally, a real bare-SKU name in the wild
+        ("mistral-medium"). The spec's closed fold-list includes "-medium"
+        as an effort suffix, so this fold is a deliberate, documented
+        trade-off -- NOT a bug -- and is guarded at the get_model_tier layer
+        by the "direct key always shadows the folded index" rule (a bare key
+        already in the quality table is never overridden by a fold).
+        """
+        from frugon.model_id import effort_family
+
+        assert effort_family("mistral-medium") == "mistral"
+
+    def test_effort_family_idempotent(self) -> None:
+        """Arrange: effort-suffixed and already-bare model names.
+        Act: effort_family twice.
+        Assert: idempotent — only ONE suffix is ever stripped per call, and a
+        second call on the already-folded result is a no-op.
+        """
+        from frugon.model_id import effort_family
+
+        assert effort_family(effort_family("gpt-5-high")) == "gpt-5"
+        assert effort_family(effort_family("gpt-5")) == "gpt-5"
+        assert effort_family(effort_family("x-no-thinking")) == "x"
+
+    def test_effort_family_pure_no_io(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Assert effort_family() makes no file or network I/O — pure function."""
+        import socket
+
+        def _no_network(*args: object, **kwargs: object) -> None:
+            raise AssertionError("effort_family() must not make network calls")
+
+        monkeypatch.setattr(socket, "socket", _no_network)
+
+        from frugon.model_id import effort_family
+
+        effort_family("gpt-5-high")  # must not raise

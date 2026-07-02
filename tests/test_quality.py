@@ -46,6 +46,7 @@ from frugon.quality import (
     VERDICT_MINOR,
     QualityUpdateError,
     _assign_percentile_tiers,
+    _build_folded_index,
     _detect_category_and_date_columns,
     _fetch_one_page,
     classify_quality_update,
@@ -416,6 +417,222 @@ class TestCanonicalizeLookup:
     def test_known_model_is_not_unrated(self) -> None:
         """is_unrated returns False for gpt-4o."""
         assert is_unrated("gpt-4o") is False
+
+
+# ---------------------------------------------------------------------------
+# Regression pins — existing resolutions must stay byte-identical after the
+# effort-fold + date/version-fold extension (no behaviour change for any
+# model name that resolved before this change).
+# ---------------------------------------------------------------------------
+
+
+class TestGetModelTierNoRegression:
+    """Pin three existing resolution paths against the bundled seed."""
+
+    def test_gpt4o_still_rated_same_as_before(self) -> None:
+        """gpt-4o resolves via direct canonical match, unaffected by new folds."""
+        tier = get_model_tier("gpt-4o")
+        assert tier in {0, 1, 2, 3}
+
+    def test_openrouter_gpt4o_still_matches_base(self) -> None:
+        """openrouter/gpt-4o still resolves to the same tier as the bare name."""
+        assert get_model_tier("openrouter/gpt-4o") == get_model_tier("gpt-4o")
+
+    def test_claude3_haiku_still_tier_3_via_base_family(self) -> None:
+        """claude-3-haiku-20240307 still resolves to tier 3 via the pre-existing
+        ISO/compact date base_family fold (unrelated to the new fold forms)."""
+        assert get_model_tier("claude-3-haiku-20240307") == 3
+
+
+# ---------------------------------------------------------------------------
+# Effort-fold + date/version-fold recovery — get_model_tier
+# ---------------------------------------------------------------------------
+
+
+class TestGetModelTierEffortFold:
+    """get_model_tier must recover a quality signal for a bare reasoning-model
+    name whose only rated seed entry carries a trailing effort suffix, a
+    trailing date/version pin, or both -- see model_id.effort_family and
+    quality._build_folded_index.
+    """
+
+    def test_bare_gpt5_resolves_via_high_variant(self) -> None:
+        """The seed rates 'gpt-5-high' but not bare 'gpt-5'; get_model_tier
+        must recover the '-high' variant's tier for the bare name.
+        """
+        tier_map, _, _ = load_quality_table()
+        assert "gpt-5-high" in tier_map, "fixture assumption: seed must carry gpt-5-high"
+        assert "gpt-5" not in tier_map, "fixture assumption: bare gpt-5 must be absent"
+
+        assert get_model_tier("gpt-5") == tier_map["gpt-5-high"]
+
+    def test_bare_gpt5_mini_resolves_via_high_variant(self) -> None:
+        """'gpt-5-mini-high' rated but bare 'gpt-5-mini' is not -- mini is a
+        SKU (never folded), high is the effort suffix that IS folded.
+        """
+        tier_map, _, _ = load_quality_table()
+        assert "gpt-5-mini-high" in tier_map
+        assert "gpt-5-mini" not in tier_map
+
+        assert get_model_tier("gpt-5-mini") == tier_map["gpt-5-mini-high"]
+
+    def test_direct_key_shadows_folded_index(self) -> None:
+        """A bare key that exists directly in the table always wins over any
+        folded-index recovery -- verified against a REAL bundled-seed
+        collision where the direct tier and the index-recovered tier
+        actually differ (deepseek-r1 is rated directly at one tier, while
+        its dated variant deepseek-r1-0528 folds to a different tier).
+        """
+        tier_map, _, _ = load_quality_table()
+        assert "deepseek-r1" in tier_map, "fixture assumption: seed must rate bare deepseek-r1"
+        assert "deepseek-r1-0528" in tier_map, "fixture assumption: seed must rate deepseek-r1-0528"
+
+        folded_index = _build_folded_index(tier_map)
+        assert folded_index.get("deepseek-r1") != tier_map["deepseek-r1"], (
+            "fixture assumption: the direct tier and folded-index tier must "
+            "genuinely differ for this test to prove shadowing, not coincide"
+        )
+
+        assert get_model_tier("deepseek-r1") == tier_map["deepseek-r1"]
+
+    def test_grok4_resolves_via_dated_seed_key(self) -> None:
+        """Real-seed integration: the bundled seed rates 'grok-4-0709' (a
+        compact-MMDD dated key) but not bare 'grok-4'. The folded index folds
+        the KEY through base_family + effort_family, not the query, so this
+        can only resolve once Part B's -MMDD folding is in place.
+        """
+        tier_map, _, _ = load_quality_table()
+        assert "grok-4-0709" in tier_map, "fixture assumption: seed must carry grok-4-0709"
+        assert "grok-4" not in tier_map, "fixture assumption: bare grok-4 must be absent"
+
+        assert get_model_tier("grok-4") == tier_map["grok-4-0709"]
+
+    def test_qwen_max_resolves_via_dated_seed_key(self) -> None:
+        """Real-seed integration: the bundled seed rates 'qwen-max-0919' but
+        not bare 'qwen-max'.
+        """
+        tier_map, _, _ = load_quality_table()
+        assert "qwen-max-0919" in tier_map, "fixture assumption: seed must carry qwen-max-0919"
+        assert "qwen-max" not in tier_map, "fixture assumption: bare qwen-max must be absent"
+
+        assert get_model_tier("qwen-max") == tier_map["qwen-max-0919"]
+
+    def test_precedence_high_beats_thinking_on_collision(self) -> None:
+        """When two folded variants collide, '-high' outranks '-thinking' per
+        the deterministic precedence order.
+        """
+        custom = {
+            "widget-high": 0,
+            "widget-thinking": 2,
+        }
+        index = _build_folded_index(custom)
+        assert index["widget"] == 0
+
+    def test_precedence_thinking_beats_medium_on_collision(self) -> None:
+        """'-thinking' outranks '-medium' per the precedence order."""
+        custom = {
+            "widget-medium": 3,
+            "widget-thinking": 1,
+        }
+        index = _build_folded_index(custom)
+        assert index["widget"] == 1
+
+    def test_precedence_dated_variants_prefer_lexicographically_last_key(self) -> None:
+        """Two dated-only variants (no effort suffix) folding to the same base
+        -- the lexicographically LAST original key wins. For year-carrying
+        forms like these (an implicit shared year), lexicographic order
+        happens to track chronological order too, so this also reads as
+        "newest snapshot wins" -- but the tie-break itself is a deterministic
+        ordering rule, not a calendar computation (see
+        test_precedence_year_less_forms_tie_break_can_invert_across_a_year for
+        the case where that coincidence does NOT hold).
+        """
+        custom = {
+            "grok-4-0709": 2,
+            "grok-4-1105": 0,
+        }
+        index = _build_folded_index(custom)
+        # "grok-4-1105" > "grok-4-0709" lexicographically -> its tier wins.
+        assert index["grok-4"] == 0
+
+    def test_precedence_year_less_forms_tie_break_can_invert_across_a_year(self) -> None:
+        """Year-less -MMDD / -MM-DD forms carry no year information, so the
+        lexicographic tie-break is a deterministic, stable choice -- NOT a
+        genuine "newest snapshot" computation. This is the documented
+        counter-example: 'model-1215' (December of some OLDER year) sorts
+        lexicographically AFTER, and therefore wins over, 'model-0110'
+        (January of a NEWER year), even though 0110 is chronologically the
+        more recent snapshot. No such cross-year collision exists in the
+        bundled seed today; this test pins the documented, deterministic
+        (if not chronologically "correct") outcome so the behaviour is
+        load-bearing rather than aspirational.
+        """
+        custom = {
+            "model-1215": 1,  # December, presumed an OLDER year
+            "model-0110": 3,  # January, presumed a NEWER year -- chronologically later
+        }
+        index = _build_folded_index(custom)
+        # "model-1215" > "model-0110" lexicographically -> it wins, even
+        # though it is the chronologically OLDER snapshot of the two.
+        assert index["model"] == 1
+
+    def test_folded_index_invalidates_on_table_reload(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Arrange: quality.json rating only 'widget-high'; get_model_tier
+        recovers 'widget' via the folded index.
+        Act: rewrite the file so 'widget-high' becomes 'widget-low' with a
+        different tier, monkeypatching the same _QUALITY_JSON path.
+        Assert: the SECOND get_model_tier call reflects the NEW file content
+        -- the folded-index cache must invalidate on table reload, not stay
+        pinned to the first-seen tier_map.
+        """
+        import frugon.quality as q
+
+        path = tmp_path / "quality.json"
+        path.write_text(
+            json.dumps(_build_quality_json({"widget-high": 0}, last_synced="2026-01-01")),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(q, "_QUALITY_JSON", path)
+
+        first = get_model_tier("widget")
+        assert first == 0
+
+        path.write_text(
+            json.dumps(_build_quality_json({"widget-low": 3}, last_synced="2026-01-02")),
+            encoding="utf-8",
+        )
+
+        second = get_model_tier("widget")
+        assert second == 3, (
+            "folded-index cache did not invalidate after quality.json changed"
+        )
+
+    def test_folded_index_reused_when_table_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Arrange: a stable quality.json across two lookups.
+        Act: call get_model_tier twice for two different bare names that both
+        recover via the same folded index.
+        Assert: both resolve correctly (index survives being reused, not just
+        rebuilt-and-discarded per call).
+        """
+        import frugon.quality as q
+
+        path = tmp_path / "quality.json"
+        path.write_text(
+            json.dumps(
+                _build_quality_json(
+                    {"widget-high": 0, "gadget-thinking": 1}, last_synced="2026-01-01"
+                )
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(q, "_QUALITY_JSON", path)
+
+        assert get_model_tier("widget") == 0
+        assert get_model_tier("gadget") == 1
 
 
 # ---------------------------------------------------------------------------

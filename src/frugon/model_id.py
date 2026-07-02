@@ -1,6 +1,6 @@
 """Model-ID canonicalization for Frugon.
 
-Two pure, deterministic, I/O-free functions:
+Three pure, deterministic, I/O-free functions:
 
 canonicalize(model)
     Strips known gateway/provider prefixes (OpenRouter, Azure, Bedrock,
@@ -12,12 +12,27 @@ canonicalize(model)
     Idempotent for already-bare names.
 
 base_family(model)
-    Folds a dated snapshot to its base model family by stripping trailing
-    :tag suffixes (:beta, :free), -latest, ISO/compact date suffixes
-    (-YYYY-MM-DD, -YYYYMMDD), and Vertex AI ``@version`` pins
-    (@YYYYMMDD, @YYYY-MM-DD, @latest, @default, @N).
-    Used **only** as a last-resort fallback in pricing lookups — never
-    rewrite user-visible output with this result.
+    Folds a dated/versioned snapshot to its base model family by stripping
+    trailing :tag suffixes (:beta, :free), -latest, Vertex AI ``@version``
+    pins (@YYYYMMDD, @YYYY-MM-DD, @latest, @default, @N), and a range of
+    date/version-pin suffixes: ISO date (-YYYY-MM-DD), compact date
+    (-YYYYMMDD), three-digit leading-zero version (-0NN), compact month-day
+    (-MMDD), month-year (-MM-YYYY), year-month (-YYYY-MM), and two-digit
+    month-day (-MM-DD).  None of these forms change a model's per-token
+    price, so folding them is safe for both pricing and quality lookups.
+    Used **only** as a last-resort fallback in lookups — never rewrite
+    user-visible output with this result.
+
+effort_family(model)
+    Strips a single trailing reasoning-effort suffix (-high, -medium, -low,
+    -minimal, -thinking, -no-thinking) so that an effort-tagged variant name
+    resolves against its base model for QUALITY-tier lookups only.  Reasoning
+    effort changes how many tokens a model spends thinking, not its
+    per-token rate, so folding it for quality is honest; folding it for
+    PRICING would not be, because some providers price a thinking variant
+    differently from its non-thinking counterpart.  Size/SKU suffixes
+    (-mini, -nano, -air, -lite, -flash, -pro, -plus, -chat, -instant,
+    -fast) are genuinely different models and are never folded.
 """
 
 from __future__ import annotations
@@ -93,6 +108,52 @@ _DATE_COMPACT_RE = re.compile(r"-\d{8}$")
 # Additional suffixes stripped by base_family for lookup-only fallback.
 _LATEST_RE = re.compile(r"-latest$", re.IGNORECASE)
 _TAG_RE = re.compile(r":[a-z][a-z0-9]*$", re.IGNORECASE)
+
+# ---------------------------------------------------------------------------
+# Additional date/version-pin suffixes stripped by base_family.
+# All are strictly narrower than a parameter count (-70b, -405b, -8x7b) or a
+# dotted minor-version pair (-4-5), so those forms are never touched.
+# ---------------------------------------------------------------------------
+
+# Three-digit leading-zero version, e.g. "gemini-2.0-flash-001" -> "...-flash".
+# The leading zero is required so a genuinely numeric-meaningful trailing
+# three-digit group (none observed in practice, but the rule is deliberately
+# narrow) is never mistaken for a version tag.
+_VERSION_3DIGIT_RE = re.compile(r"-0\d{2}$")
+
+# Compact month-day, e.g. "grok-4-0709" -> "grok-4". MM validated 01-12 so a
+# YYMM-style ending like "-2507" (month "25" is invalid) is deliberately left
+# alone -- that is a year+month compacted form the seed data also carries
+# un-folded (e.g. a "-thinking-2507" variant tag), not a date.
+_DATE_COMPACT_MMDD_RE = re.compile(r"-(0[1-9]|1[0-2])(\d{2})$")
+
+# Month-year, e.g. "command-r-08-2024" -> "command-r".
+_DATE_MM_YYYY_RE = re.compile(r"-(0[1-9]|1[0-2])-\d{4}$")
+
+# Year-month, e.g. "some-model-2025-09" -> "some-model".
+_DATE_YYYY_MM_RE = re.compile(r"-\d{4}-(0[1-9]|1[0-2])$")
+
+# Two-digit month-day, e.g. "nova-...-10-09" -> "nova-...". Both sides must be
+# exactly two digits so a single-digit minor-version pair like
+# "claude-haiku-4-5" (-4-5) never matches.
+_DATE_MM_DD_2DIGIT_RE = re.compile(r"-(0[1-9]|1[0-2])-([0-2]\d|3[01])$")
+
+# ---------------------------------------------------------------------------
+# Reasoning-effort suffixes stripped by effort_family (quality lookups only).
+# Longest-match-first: "-no-thinking" must be tried before "-thinking" so
+# "x-no-thinking" folds to "x", not "x-no".  Size/SKU suffixes (-mini, -nano,
+# -air, -lite, -flash, -pro, -plus, -chat, -instant, -fast) are deliberately
+# absent from this list -- they name genuinely different models, not an
+# effort variant of the same model.
+# ---------------------------------------------------------------------------
+_EFFORT_SUFFIXES: tuple[str, ...] = (
+    "-no-thinking",
+    "-thinking",
+    "-high",
+    "-medium",
+    "-low",
+    "-minimal",
+)
 
 
 def canonicalize(model: str) -> str:
@@ -173,19 +234,27 @@ def base_family(model: str) -> str:
     """Fold a versioned/tagged snapshot to its base model family name.
 
     Strips in order: trailing :tag (:beta, :free), -latest, Vertex AI
-    ``@version`` pin (@YYYYMMDD, @YYYY-MM-DD, @latest, @default, @N),
-    ISO date (-YYYY-MM-DD), compact date (-YYYYMMDD).
-    Used **only** as a pricing-lookup fallback — never surface this result
-    in user-visible output.
+    ``@version`` pin (@YYYYMMDD, @YYYY-MM-DD, @latest, @default, @N), then one
+    terminal date/version-pin form: ISO date (-YYYY-MM-DD), compact date
+    (-YYYYMMDD), month-year (-MM-YYYY), year-month (-YYYY-MM), three-digit
+    leading-zero version (-0NN), compact month-day (-MMDD), or two-digit
+    month-day (-MM-DD).
+    Used **only** as a lookup fallback (pricing and quality) — never surface
+    this result in user-visible output.
 
     Returns *model* unchanged when none of the above suffixes are present.
     """
-    # Three-phase by design, not by accident:
+    # Two-phase by design, not by accident:
     #   Phase 1 (tag, -latest, @version) strips *stackable* suffixes and
     #   FALLS THROUGH so a name like "gpt-4o-2024-05-13:beta" loses both the
     #   tag and the date; a name like "claude-haiku-4-5@20251001" loses the pin.
-    #   Phase 2 (ISO date, compact date) are mutually exclusive terminal forms, so
-    #   the first match RETURNS — a name carries one date format, never both.
+    #   Phase 2 (every date/version-pin form below) are mutually exclusive
+    #   terminal forms, so the first match RETURNS — a name carries at most one
+    #   such trailing form, never two. Ordering within phase 2 matters: the
+    #   longer/more-specific patterns (full ISO, compact 8-digit date, MM-YYYY,
+    #   YYYY-MM) are tried before the shorter ones (3-digit version, compact
+    #   MMDD, 2-digit MM-DD) so a longer match is never left partially stripped
+    #   by a shorter pattern matching only a suffix of it.
     tag_m = _TAG_RE.search(model)
     if tag_m:
         model = model[: tag_m.start()]
@@ -195,10 +264,49 @@ def base_family(model: str) -> str:
     vertex_m = _VERTEX_VERSION_RE.search(model)
     if vertex_m:
         model = model[: vertex_m.start()]
-    m = _DATE_ISO_RE.search(model)
-    if m:
-        return model[: m.start()]
-    c = _DATE_COMPACT_RE.search(model)
-    if c:
-        return model[: c.start()]
+
+    iso_m = _DATE_ISO_RE.search(model)
+    if iso_m:
+        return model[: iso_m.start()]
+    compact_m = _DATE_COMPACT_RE.search(model)
+    if compact_m:
+        return model[: compact_m.start()]
+    mm_yyyy_m = _DATE_MM_YYYY_RE.search(model)
+    if mm_yyyy_m:
+        return model[: mm_yyyy_m.start()]
+    yyyy_mm_m = _DATE_YYYY_MM_RE.search(model)
+    if yyyy_mm_m:
+        return model[: yyyy_mm_m.start()]
+    version3_m = _VERSION_3DIGIT_RE.search(model)
+    if version3_m:
+        return model[: version3_m.start()]
+    mmdd_m = _DATE_COMPACT_MMDD_RE.search(model)
+    if mmdd_m:
+        return model[: mmdd_m.start()]
+    mm_dd_2digit_m = _DATE_MM_DD_2DIGIT_RE.search(model)
+    if mm_dd_2digit_m:
+        return model[: mm_dd_2digit_m.start()]
+    return model
+
+
+def effort_family(model: str) -> str:
+    """Strip a single trailing reasoning-effort suffix from *model*.
+
+    Checked against ``_EFFORT_SUFFIXES`` in order (longest-match-first, so
+    the stacked "-no-thinking" form is recognised before the bare "-thinking"
+    suffix would otherwise consume only its tail). Only ONE suffix is ever
+    stripped, and only when it is the entire trailing, hyphen-delimited
+    token -- "thinking-cap-model" is untouched because "-thinking" is not at
+    the end of the string.
+
+    Pure, idempotent for already-bare names, no I/O. Reasoning effort changes
+    token volume, not a model's per-token rate, so this fold is valid **for
+    quality-tier lookups only** -- it must never be used in a pricing lookup
+    (some providers price a thinking variant differently from its
+    non-thinking counterpart).
+    """
+    lowered = model.lower()
+    for suffix in _EFFORT_SUFFIXES:
+        if lowered.endswith(suffix):
+            return model[: -len(suffix)]
     return model

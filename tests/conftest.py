@@ -120,7 +120,11 @@ def install_synthetic_quality(monkeypatch, tmp_path, tiers):
     and every tier path funnels through it — ``quality.get_model_tier``,
     ``cost._get_model_tier`` (the captured ``get_model_tier`` reference), and
     ``measure.best_judge_for_available_keys`` (call-time import) — so one patch
-    governs them all. No cache to clear.
+    governs them all. The one derived cache on this path, ``quality._folded_index_cache``
+    (the effort/date-fold reverse index used to recover a bare name from a
+    rated variant), is keyed by a content signature of the just-loaded tier
+    map rather than by path — it self-invalidates the moment the tier
+    content changes, so no explicit clear is needed here either.
     """
     table: dict[str, object] = {
         "_last_synced": "2026-01-01",

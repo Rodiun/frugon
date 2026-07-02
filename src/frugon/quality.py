@@ -57,7 +57,7 @@ from frugon._store import (
     seed_if_missing,
     validate_fetch_url,
 )
-from frugon.model_id import base_family, canonicalize
+from frugon.model_id import base_family, canonicalize, effort_family
 
 # ---------------------------------------------------------------------------
 # Path constants
@@ -530,6 +530,122 @@ def load_quality_table() -> tuple[dict[str, int], str | None, str | None]:
 
 
 # ---------------------------------------------------------------------------
+# Effort-folded reverse index — quality-lookup recovery mechanism
+#
+# LMArena rates reasoning models under effort-variant AND dated-snapshot names
+# ("gpt-5-high", "qwen3-235b-a22b-thinking", "grok-4-0709", "qwen-max-0919"),
+# so a bare name a user actually calls with ("gpt-5", "grok-4", "qwen-max")
+# may have no direct entry even though a rated variant of the same model
+# exists. This index maps effort_family(base_family(key)) -> tier for every
+# seed key whose fully-folded form differs from the key itself, so
+# get_model_tier can recover a quality signal for the bare name. Folding the
+# KEYS (not just the query) is what recovers "grok-4" from the seed's
+# "grok-4-0709" entry: the query "grok-4" is already bare, so only folding
+# the stored keys exposes the match.
+#
+# Reasoning effort changes token *volume*, not a model's per-token rate, so
+# attributing the effort-variant's tier to the bare name is honest for
+# QUALITY only -- this index must never be consulted by a pricing lookup.
+# Date/version pins never change price either, but base_family folding is
+# already used for pricing lookups elsewhere (model_id.base_family docstring)
+# via a separate, non-cached code path -- this index is quality-only.
+# ---------------------------------------------------------------------------
+
+# Precedence among colliding folded keys that reduce to the same bare name,
+# most-preferred first. This approximates a provider's DEFAULT reasoning
+# effort: frontier vendors typically default new reasoning models to their
+# highest or a "thinking-on" mode, tailing off to lower/no-effort variants.
+# A bare key already present in the table always wins over any folded
+# variant (enforced by lookup order in get_model_tier, not by this list).
+_EFFORT_PRECEDENCE: tuple[str, ...] = (
+    "-high",
+    "-thinking",
+    "-medium",
+    "-low",
+    "-minimal",
+    "-no-thinking",
+)
+
+# (signature, index) — cached against a content signature of the just-loaded
+# tier_map so the index is rebuilt exactly when the underlying table changes,
+# without adding any caching to load_quality_table itself (existing tests
+# monkeypatch _QUALITY_JSON per-call and expect an immediate, uncached
+# re-read).
+_folded_index_cache: tuple[int, dict[str, int]] | None = None
+
+
+def _tier_map_signature(tier_map: dict[str, int]) -> int:
+    """Return a content-based signature for *tier_map* (order-independent)."""
+    return hash(frozenset(tier_map.items()))
+
+
+def _build_folded_index(tier_map: dict[str, int]) -> dict[str, int]:
+    """Build the effort_family(base_family(key)) -> tier reverse index.
+
+    For each seed key whose fully-folded form (base_family then
+    effort_family) differs from the key itself, group by the folded name and
+    keep the tier belonging to the highest-precedence candidate:
+
+      1. An effort suffix present in _EFFORT_PRECEDENCE beats any candidate
+         without one (dated-only variants included) -- rank by list position.
+      2. Among two candidates with no recognised effort suffix (e.g. two
+         differently-dated snapshots of the same base), the lexicographically
+         LAST original key wins. This is a DETERMINISTIC, stable tie-break --
+         NOT a genuine newest-snapshot rule in general. It only coincides
+         with "newest" for year-carrying date forms (full ISO -YYYY-MM-DD,
+         compact 8-digit -YYYYMMDD), where lexicographic order tracks
+         chronological order (e.g. "grok-4-0709" vs a hypothetical
+         "grok-4-1105" both carry an implicit shared year, so the later
+         snapshot does sort last). For year-less forms (-MMDD, -MM-DD) it can
+         INVERT across a year boundary -- "model-1215" (a Dec snapshot from
+         an OLDER year) sorts lexicographically after, and would incorrectly
+         "win" over, "model-0110" (a Jan snapshot from a NEWER year) -- there
+         is no year information in either key to resolve that correctly. No
+         such cross-year collision exists in the bundled seed today; the
+         tie-break is deliberately kept simple and stable rather than
+         over-engineered against a case that has not occurred.
+    """
+    # candidates: folded_name -> list of (precedence_rank, original_key)
+    candidates: dict[str, list[tuple[int, str]]] = {}
+    for key in tier_map:
+        folded = effort_family(base_family(key))
+        if folded == key:
+            continue
+        suffix = key[len(folded) :]
+        try:
+            rank = _EFFORT_PRECEDENCE.index(suffix.lower())
+        except ValueError:
+            rank = len(_EFFORT_PRECEDENCE)
+        candidates.setdefault(folded, []).append((rank, key))
+
+    index: dict[str, int] = {}
+    for folded, entries in candidates.items():
+        # Sort by precedence_rank ascending, then take the lexicographically
+        # LAST key among the best-ranked ties. This is a deterministic,
+        # stable tie-break -- it only APPROXIMATES "newest snapshot wins" for
+        # year-carrying date forms; for year-less forms (-MMDD, -MM-DD) it can
+        # invert across a year boundary (see the docstring above). No such
+        # collision exists in the bundled seed today.
+        entries.sort(key=lambda pair: pair[0])
+        best_rank = entries[0][0]
+        tied = [key for rank, key in entries if rank == best_rank]
+        best_key = max(tied)
+        index[folded] = tier_map[best_key]
+    return index
+
+
+def _get_folded_index(tier_map: dict[str, int]) -> dict[str, int]:
+    """Return the (possibly cached) folded index for *tier_map*."""
+    global _folded_index_cache
+    signature = _tier_map_signature(tier_map)
+    if _folded_index_cache is not None and _folded_index_cache[0] == signature:
+        return _folded_index_cache[1]
+    index = _build_folded_index(tier_map)
+    _folded_index_cache = (signature, index)
+    return index
+
+
+# ---------------------------------------------------------------------------
 # Public tier lookup
 # ---------------------------------------------------------------------------
 
@@ -537,10 +653,18 @@ def load_quality_table() -> tuple[dict[str, int], str | None, str | None]:
 def get_model_tier(model: str) -> int:
     """Return the quality tier for *model*, or UNRATED_TIER if unknown.
 
-    Lookup order: canonicalize(model) → exact match → base_family fallback.
+    Lookup order: canonicalize(model) exact -> effort_family(canon) exact ->
+    base_family(canon) exact -> effort_family(base_family(canon)) exact ->
+    folded-index lookup. First hit wins.
+
     The table stores base_family-normalised keys ("gpt-4o"), so versioned
     API names ("gpt-4o-2024-08-06") and gateway-prefixed names
-    ("openrouter/gpt-4o") both resolve correctly.
+    ("openrouter/gpt-4o") both resolve correctly. The effort-family steps
+    let a bare reasoning-model name ("gpt-5") resolve against an
+    effort-tagged seed entry ("gpt-5-high") when LMArena only rated the
+    effort variant -- see the module-level index docs above. A key that
+    exists directly in the table always shadows the folded index because the
+    exact-match steps run first.
     """
     tier_map, _, _ = load_quality_table()
     if not tier_map:
@@ -551,9 +675,23 @@ def get_model_tier(model: str) -> int:
     if canon in tier_map:
         return tier_map[canon]
 
+    effort_canon = effort_family(canon)
+    if effort_canon != canon and effort_canon in tier_map:
+        return tier_map[effort_canon]
+
     base = base_family(canon)
     if base != canon and base in tier_map:
         return tier_map[base]
+
+    effort_base = effort_family(base)
+    if effort_base != base and effort_base in tier_map:
+        return tier_map[effort_base]
+
+    folded_index = _get_folded_index(tier_map)
+    if canon in folded_index:
+        return folded_index[canon]
+    if base != canon and base in folded_index:
+        return folded_index[base]
 
     return UNRATED_TIER
 

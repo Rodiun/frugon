@@ -162,6 +162,10 @@ roster.
 Your numbers depend on your logs and your locally synced pricing/quality data.
 Run `frugon analyze --demo` to see the same output on your machine.
 
+Quality tiers for reasoning models reflect the model at its default/typical
+reasoning effort — effort changes how many tokens a call spends thinking, not
+its per-token rate, so it never affects the price shown above.
+
 ## How it's different
 
 A provider's billing dashboard tells you what you *already* spent, and a raw
