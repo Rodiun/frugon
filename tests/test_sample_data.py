@@ -28,7 +28,7 @@ from typing import Any
 import pytest
 import tokencost  # type: ignore[import-untyped]
 
-from frugon.cost import _DEMO_CANDIDATES, analyze_records, parse_record
+from frugon.cost import analyze_records, parse_record
 
 # ---------------------------------------------------------------------------
 # Locate + load the bundled (gzip-compressed) sample file
@@ -167,8 +167,11 @@ def test_fixture_generation_is_byte_deterministic(tmp_path: Path) -> None:
 
 
 def _analyze_fixture() -> Any:
+    """Analyze the fixture with candidates=None — the SAME default
+    ``_ROUTING_CANDIDATES`` pool ``frugon analyze --demo`` now uses (no
+    demo-only pin)."""
     records = [r for r in (parse_record(raw) for raw in _RECORDS) if r is not None]
-    return analyze_records(records, candidates=_DEMO_CANDIDATES)
+    return analyze_records(records, candidates=None)
 
 
 def test_fixture_accounting_reconciles_every_call() -> None:
@@ -214,9 +217,11 @@ def test_fixture_lands_in_team_scale_register() -> None:
     total_saving_pct = baseline_reduction / result.total_cost * Decimal("100")
     assert Decimal("30") <= total_saving_pct <= Decimal("40")
 
-    # The split routes to gpt-4.1-mini and keeps the hard calls on gpt-5.5.
+    # The split routes to the fixed-point recommended candidate (see
+    # scripts/gen_sample_logs.py's _RECOMMENDED_CANDIDATE) and keeps the hard
+    # calls on gpt-5.5.
     assert split.baseline_model == "gpt-5.5"
-    assert split.candidate_model == "gpt-4.1-mini"
+    assert split.candidate_model == "deepseek-v4-flash"
     assert split.routed_count > 0
     assert split.kept_count > 0
 

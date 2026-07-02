@@ -476,46 +476,86 @@ class TestGetModelTierEffortFold:
 
         assert get_model_tier("gpt-5-mini") == tier_map["gpt-5-mini-high"]
 
-    def test_direct_key_shadows_folded_index(self) -> None:
+    def test_direct_key_shadows_folded_index(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A bare key that exists directly in the table always wins over any
-        folded-index recovery -- verified against a REAL bundled-seed
-        collision where the direct tier and the index-recovered tier
-        actually differ (deepseek-r1 is rated directly at one tier, while
-        its dated variant deepseek-r1-0528 folds to a different tier).
-        """
-        tier_map, _, _ = load_quality_table()
-        assert "deepseek-r1" in tier_map, "fixture assumption: seed must rate bare deepseek-r1"
-        assert "deepseek-r1-0528" in tier_map, "fixture assumption: seed must rate deepseek-r1-0528"
+        folded-index recovery.
 
-        folded_index = _build_folded_index(tier_map)
-        assert folded_index.get("deepseek-r1") != tier_map["deepseek-r1"], (
-            "fixture assumption: the direct tier and folded-index tier must "
+        Mechanism proof via a controlled synthetic table (the 2026-07-02
+        quality sync consolidated the upstream leaderboard's dated/bare
+        duplicates before frugon's own dedup ever sees them -- e.g. what was
+        previously two distinct seed entries, ``deepseek-r1`` (tier 2) and
+        ``deepseek-r1-0528`` (tier 1), is now dedup'd to ONE key by
+        fetch_and_update_quality's own max-score-per-canonical-key pass, so
+        the bundled seed no longer carries a live shadowing collision to
+        assert against. The precedence rule itself -- direct hit beats
+        folded-index recovery -- is a property of get_model_tier's lookup
+        order, not of any one seed snapshot, so a synthetic table proves it
+        deterministically regardless of what the live seed happens to shadow
+        this week.
+        """
+        synthetic = {
+            "widget-r1": 2,
+            "widget-r1-0528": 1,
+        }
+
+        def _fake_load() -> tuple[dict[str, int], str | None, str | None]:
+            return synthetic, "2026-07-02", None
+
+        monkeypatch.setattr("frugon.quality.load_quality_table", _fake_load)
+
+        folded_index = _build_folded_index(synthetic)
+        assert folded_index.get("widget-r1") != synthetic["widget-r1"], (
+            "fixture bug: the direct tier and folded-index tier must "
             "genuinely differ for this test to prove shadowing, not coincide"
         )
+        assert get_model_tier("widget-r1") == synthetic["widget-r1"]
 
-        assert get_model_tier("deepseek-r1") == tier_map["deepseek-r1"]
+    def test_grok3_mini_resolves_via_real_seed_fold(self) -> None:
+        """Real-seed integration: bare 'grok-3-mini' is ABSENT from the bundled
+        seed; only the effort-tagged 'grok-3-mini-high' is rated.  This is a
+        genuinely fold-DEPENDENT case (16 such fold-only keys currently exist
+        in the seed, e.g. grok-3-mini, gpt-5, gpt-5-mini, gpt-5-nano) -- unlike
+        'grok-4'/'qwen-max', which the 2026-07-02 sync's own dedup pass folded
+        to a DIRECT bare-key hit, making a bare-key assertion on them
+        tautological (the direct-match branch fires before the folded index is
+        even consulted).  grok-3-mini is also a live _ROUTING_CANDIDATES
+        roster member, so this doubles as a real recommendation-path guard.
 
-    def test_grok4_resolves_via_dated_seed_key(self) -> None:
-        """Real-seed integration: the bundled seed rates 'grok-4-0709' (a
-        compact-MMDD dated key) but not bare 'grok-4'. The folded index folds
-        the KEY through base_family + effort_family, not the query, so this
-        can only resolve once Part B's -MMDD folding is in place.
+        If a future sync adds a bare 'grok-3-mini' entry, this fixture
+        assumption breaks and the test is no longer fold-dependent -- skip
+        loudly (not silently pass) so the drift is visible, and pick a
+        replacement from the current fold-only set.
         """
         tier_map, _, _ = load_quality_table()
-        assert "grok-4-0709" in tier_map, "fixture assumption: seed must carry grok-4-0709"
-        assert "grok-4" not in tier_map, "fixture assumption: bare grok-4 must be absent"
+        if "grok-3-mini" in tier_map:
+            pytest.skip(
+                "fixture assumption broken: the seed now rates bare "
+                "'grok-3-mini' directly, so this is no longer a fold-"
+                "dependent case. Replace with another fold-only key from "
+                "the seed's current base_family/effort_family fold set."
+            )
+        assert "grok-3-mini-high" in tier_map, (
+            "fixture assumption: seed must rate grok-3-mini-high"
+        )
+        assert get_model_tier("grok-3-mini") == tier_map["grok-3-mini-high"]
 
-        assert get_model_tier("grok-4") == tier_map["grok-4-0709"]
+    def test_qwen_max_resolves_correctly_real_seed(self) -> None:
+        """Real-seed spot check: 'qwen-max' resolves to a real rated tier.
 
-    def test_qwen_max_resolves_via_dated_seed_key(self) -> None:
-        """Real-seed integration: the bundled seed rates 'qwen-max-0919' but
-        not bare 'qwen-max'.
+        As of the 2026-07-02 quality sync, the bundled seed's dedup pass
+        already consolidated the dated 'qwen-max-0919' entry into the bare
+        'qwen-max' key (a DIRECT hit, no fold needed) -- a plain regression
+        guard, not a fold-recovery proof (see
+        test_grok3_mini_resolves_via_real_seed_fold above for a genuinely
+        fold-dependent real-seed case, and
+        test_direct_key_shadows_folded_index for the fold-precedence
+        mechanism on a synthetic table).
         """
         tier_map, _, _ = load_quality_table()
-        assert "qwen-max-0919" in tier_map, "fixture assumption: seed must carry qwen-max-0919"
-        assert "qwen-max" not in tier_map, "fixture assumption: bare qwen-max must be absent"
-
-        assert get_model_tier("qwen-max") == tier_map["qwen-max-0919"]
+        assert "qwen-max" in tier_map, "fixture assumption: seed must rate qwen-max"
+        assert get_model_tier("qwen-max") == tier_map["qwen-max"]
 
     def test_precedence_high_beats_thinking_on_collision(self) -> None:
         """When two folded variants collide, '-high' outranks '-thinking' per

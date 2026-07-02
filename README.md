@@ -108,42 +108,43 @@ frugon analyze ./logs.jsonl     # see the cost breakdown and routing recommendat
 ## Example output
 
 ```
-$ frugon analyze --demo
+$ frugon analyze --demo --candidates claude-sonnet-4-5,gpt-4.1,claude-haiku-4-5,gemini-2.5-flash,deepseek-v4-flash
 
 ┌─ frugon · cost analysis ────────────────────────────────────────────────────┐
 │                                                                             │
 │   Analyzed      56,100 calls  ·  baseline gpt-5.5 (your current model)      │
-│   Current spend $552.19 / mo                                                │
+│   Current spend $549.46 / mo                                                │
 │                                                                             │
-│     Route  36,100 easy calls (64.4%)  →  gpt-4.1-mini   within tolerance    │
+│     Route  36,100 easy calls (64.4%)  →  deepseek-v4-flash   within         │
+│   tolerance                                                                 │
 │     Keep   10,000 hard calls (17.8%)  →  gpt-5.5                            │
-│     Keep   10,000 already on gpt-4.1-mini (17.8%)   already optimal — no    │
-│   action                                                                    │
+│     Keep   10,000 already on deepseek-v4-flash (17.8%)   already optimal    │
+│   — no action                                                               │
 │                                                                             │
-│   New spend     $356.40 / mo                                                │
+│   New spend     $343.91 / mo                                                │
 │                                                                             │
-│   SAVING        $195.79 / mo    ·    35.5% lower                            │
+│   SAVING        $205.55 / mo    ·    37.4% lower                            │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
                                                                                
   Candidates considered                                                        
-  claude-sonnet-4-5  $454.95 / mo  17.6% lower  considered                     
-  gpt-4.1            $408.62 / mo  26.0% lower  considered                     
-  claude-haiku-4-5   $380.55 / mo  31.1% lower  considered                     
-  gemini-2.5-flash   $359.08 / mo  35.0% lower  considered                     
-  gpt-4.1-mini       $356.40 / mo  35.5% lower  recommended                    
+  claude-sonnet-4-5  $452.23 / mo  17.7% lower  considered                     
+  gpt-4.1            $405.89 / mo  26.1% lower  considered                     
+  claude-haiku-4-5   $377.82 / mo  31.2% lower  considered                     
+  gemini-2.5-flash   $356.35 / mo  35.1% lower  considered                     
+  deepseek-v4-flash  $343.91 / mo  37.4% lower  recommended                    
   Each candidate is shown under the same quality-preserving split (easy calls  
   to the candidate, hard calls kept on baseline); the cheapest split is the    
   headline recommendation. Run --measure --judge to score each candidate's     
   quality.                                                                     
 
   Accounting   36,100 routed + 10,000 kept (gpt-5.5) + 10,000 already on 
-               cheaper gpt-4.1-mini  =  56,100 analyzed
-  Upper bound  a full swap to gpt-4.1-mini saves ~92.9% — run with --verbose 
-               for detail
-  Quality tier gpt-5.5: Elite  →  gpt-4.1-mini: Capable   (LMArena)
-  Prices       synced 2026-06-18
-  Quality      synced 2026-06-30
+               cheaper deepseek-v4-flash  =  56,100 analyzed
+  Upper bound  a full swap to deepseek-v4-flash saves ~98.1% — run with 
+               --verbose for detail
+  Quality tier gpt-5.5: Elite  →  deepseek-v4-flash: Strong   (LMArena)
+  Prices       synced 2026-07-02
+  Quality      synced 2026-07-02
 
 ⚠ Quality is not verified — 'within tolerance' is an offline estimate;
   run --measure to confirm it on your real outputs before you switch.
@@ -152,15 +153,15 @@ $ frugon analyze --demo
 → Route every call automatically and hold the saving:  https://frugon.rodiun.io
 
 Recommendations use a curated set of current top models across providers, drawn
-from OpenRouter usage rankings. Prices synced 2026-06-18 from the LiteLLM 
+from OpenRouter usage rankings. Prices synced 2026-07-02 from the LiteLLM 
 registry. Run `frugon update` for the full live roster.
-This is bundled sample data with a fixed demo candidate set — run `frugon 
-analyze <your-logs>` for a recommendation on your own logs against the full 
-roster.
+This is bundled sample data — run `frugon analyze <your-logs>` for a 
+recommendation on your own logs.
 ```
 
 Your numbers depend on your logs and your locally synced pricing/quality data.
-Run `frugon analyze --demo` to see the same output on your machine.
+Run `frugon analyze --demo --candidates claude-sonnet-4-5,gpt-4.1,claude-haiku-4-5,gemini-2.5-flash,deepseek-v4-flash`
+to see the same output on your machine.
 
 Quality tiers for reasoning models reflect the model at its default/typical
 reasoning effort — effort changes how many tokens a call spends thinking, not

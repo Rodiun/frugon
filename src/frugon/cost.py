@@ -557,16 +557,15 @@ _ROUTING_CANDIDATES = [
     "llama-4-scout-17b-16e-instruct",
 ]
 
-# Pinned demo candidate pool — keeps the --demo recommendation and every
-# committed demo number numerically identical as the default pool evolves.
-# --demo --measure stays single-OpenAI-key.  Real users get the full 23-model pool.
-_DEMO_CANDIDATES: list[str] = [
-    "claude-sonnet-4-5",
-    "gpt-4.1",
-    "claude-haiku-4-5",
-    "gemini-2.5-flash",
-    "gpt-4.1-mini",
-]
+# Measure-only candidate pin for ``--demo --measure``.  The demo's RECOMMENDATION
+# uses the SAME default _ROUTING_CANDIDATES pool as a real run (demo == production
+# — that is the whole point of a demo). This single-model pin exists ONLY so the
+# try-out path (`frugon analyze --demo --measure`) needs just an OPENAI_API_KEY —
+# no signup, no multi-provider key hunt, to sample one live call and show the
+# --measure UX end-to-end. It does NOT affect the recommendation math: cli.py
+# passes it to verify_measure_prerequisites/run_measure as the sampled model,
+# never as the `candidates=` argument to analyze_records.
+_DEMO_MEASURE_CANDIDATE: str = "gpt-4.1-mini"
 
 def _get_model_tier(model: str) -> int:
     """Return the quality tier for *model*, or _UNRATED_TIER if not in the table.

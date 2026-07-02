@@ -925,6 +925,16 @@ def analyze(
             precheck_models.append(_dominant_model)
         if candidate_list:
             precheck_models.extend(candidate_list)
+        elif demo and not wholesale:
+            # --demo --measure: the demo's try-out path samples a single pinned
+            # model (_DEMO_MEASURE_CANDIDATE) so it needs only OPENAI_API_KEY —
+            # not whichever of the 23-vendor roster the real recommendation would
+            # pick, which could demand any provider's key. This does NOT affect
+            # the recommendation math (analyze_records still gets the full
+            # default pool below); it only scopes what --measure samples.
+            from frugon.cost import _DEMO_MEASURE_CANDIDATE
+
+            precheck_models.append(_DEMO_MEASURE_CANDIDATE)
         elif _dominant_model and not wholesale:
             # No explicit --candidates and split routing is active (the default):
             # the default measured candidate is the split recommendation.  Derive
@@ -932,11 +942,10 @@ def analyze(
             # verify here is the key the sampled model needs.  None when no rated,
             # priced, strictly-cheaper candidate exists — the backstop covers
             # that residual case.
-            from frugon.cost import _DEMO_CANDIDATES, _ROUTING_CANDIDATES
+            from frugon.cost import _ROUTING_CANDIDATES
             from frugon.routing import select_easy_target
 
-            _active_pool = _DEMO_CANDIDATES if demo else _ROUTING_CANDIDATES
-            recommended = select_easy_target(_dominant_model, _active_pool)
+            recommended = select_easy_target(_dominant_model, _ROUTING_CANDIDATES)
             if recommended:
                 precheck_models.append(recommended)
         if judge:
@@ -1025,14 +1034,10 @@ def analyze(
                 f"{len(analysis_records):,} records — this may take a moment."
             )
 
-        # When --demo is active and no explicit --candidates were supplied, pin
-        # the demo pool so the demo recommendation and its dollar figures stay
-        # numerically stable as _ROUTING_CANDIDATES evolves over time.
+        # --demo uses the SAME default candidate pool as a real run (passing
+        # None lets analyze_records fall back to _ROUTING_CANDIDATES) — demo ==
+        # production is the whole point of the demo. No demo-only pin here.
         _effective_candidates: list[str] | None = candidate_list
-        if demo and candidate_list is None:
-            from frugon.cost import _DEMO_CANDIDATES
-
-            _effective_candidates = _DEMO_CANDIDATES
 
         with progress.bar("Pricing", total=len(analysis_records)) as pricing_task, Stopwatch() as sw:
             result = analyze_records(
@@ -1090,15 +1095,13 @@ def analyze(
 
     # Pool notice — shown whenever a recommendation was made and the default pool
     # was used (not an explicit --candidates run).  Tells the user where prices
-    # come from and how to refresh, without blocking output.
-    # When --demo is active with no explicit --candidates, _DEMO_CANDIDATES is
-    # passed so used_default_pool is False, but we still want the notice.
-    # Single-source the demo-default-pool predicate so the notice and the sample
-    # disclosure below can never drift apart (they gate on the same condition).
+    # come from and how to refresh, without blocking output.  --demo now runs the
+    # SAME default pool as a real run, so this fires identically for both —
+    # single-source on result.used_default_pool, no demo-specific branch needed.
     _demo_default_pool = demo and candidate_list is None
     _show_pool_notice = (
         result.split is not None or result.candidate_model is not None
-    ) and (result.used_default_pool or _demo_default_pool)
+    ) and result.used_default_pool
     if _show_pool_notice:
         import datetime as _dt
 
@@ -1117,15 +1120,14 @@ def analyze(
             f"{_stale_suffix}[/dim]"
         )
 
-    # Demo sample disclosure — the demo runs on bundled sample data against a
-    # fixed illustrative candidate set (not the full live roster a real run uses),
-    # so be explicit it's a sample and point at real-log analysis.  Keeps the
-    # demo's recommendation from being read as what every user would get.
+    # Demo sample disclosure — the demo runs on bundled SAMPLE DATA (a synthetic
+    # log, not a real team's traffic), but against the SAME default candidate
+    # roster and pool notice above a real run uses — demo == production. Be
+    # explicit that only the DATA is a sample, and point at real-log analysis.
     if _demo_default_pool:
         rprint(
-            "[dim]This is bundled sample data with a fixed demo candidate set — run "
-            "`frugon analyze <your-logs>` for a recommendation on your own logs "
-            "against the full roster.[/dim]"
+            "[dim]This is bundled sample data — run `frugon analyze <your-logs>` "
+            "for a recommendation on your own logs.[/dim]"
         )
 
     # --- --measure: sample real prompts (must run BEFORE the report is written
@@ -1179,8 +1181,20 @@ def analyze(
             # auto-selected wholesale model.  Fall back to the wholesale
             # candidate only when there is no split (e.g. --wholesale).  Explicit
             # --candidates always win (the user's stated intent).
+            #
+            # --demo --measure is the one exception: the demo's try-out path
+            # samples the single pinned _DEMO_MEASURE_CANDIDATE (needs only
+            # OPENAI_API_KEY) rather than whatever the un-pinned 23-vendor
+            # roster recommends, which could demand any provider's key. This
+            # only scopes what --measure samples; the recommendation math and
+            # the printed headline are unaffected (they come from `result`,
+            # computed against the full default pool).
             default_candidate: str | None = None
-            if result.split is not None and result.split.candidate_model:
+            if demo and candidate_list is None:
+                from frugon.cost import _DEMO_MEASURE_CANDIDATE
+
+                default_candidate = _DEMO_MEASURE_CANDIDATE
+            elif result.split is not None and result.split.candidate_model:
                 default_candidate = result.split.candidate_model
             elif result.candidate_model:
                 default_candidate = result.candidate_model

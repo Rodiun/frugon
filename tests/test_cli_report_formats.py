@@ -27,7 +27,7 @@ import pytest
 from typer.testing import CliRunner
 
 from frugon.cli import app
-from frugon.cost import _DEMO_CANDIDATES, analyze_records, iter_records
+from frugon.cost import analyze_records, iter_records
 from frugon.report import (
     render_html,
     render_html_v2,
@@ -306,9 +306,11 @@ def test_cli_env_var_full_set_matches_single_renders(
     assert frugon.__file__ is not None
     sample = pathlib.Path(frugon.__file__).parent / "data" / "sample_logs.jsonl.gz"
     records, skipped = iter_records(sample)
+    # candidates=None — the CLI's --demo path no longer pins a demo-only pool;
+    # it uses the SAME default _ROUTING_CANDIDATES pool as a real analyze.
     result = analyze_records(
         list(records), skipped_malformed=skipped, split_routing=True,
-        candidates=_DEMO_CANDIDATES,
+        candidates=None,
     )
     renderer = {
         ".md": render_markdown_v2,

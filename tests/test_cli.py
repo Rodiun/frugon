@@ -306,18 +306,20 @@ def test_analyze_demo_pool_notice_renders(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_analyze_demo_sample_disclosure(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--demo discloses it is bundled sample data with a fixed candidate set.
+    """--demo discloses it is bundled sample data.
 
-    The demo pins a fixed candidate pool, so its recommendation is illustrative —
-    not what a real run against the full roster yields.  The disclosure keeps that
-    honest and points the user at analysing their own logs.
+    FRG-OSS-034 Phase 3 un-pinned the demo's candidate pool — it now uses the
+    SAME default roster as a real run, so only the DATA (not the candidate set)
+    is illustrative.  The disclosure says so honestly and points the user at
+    analysing their own logs.
     """
     result = runner.invoke(
         app, ["analyze", "--demo", "--no-progress"], catch_exceptions=False
     )
     assert result.exit_code == 0, f"exited {result.exit_code}: {result.output}"
     flat = " ".join(result.output.split())  # collapse Rich line-wrapping
-    assert "bundled sample data with a fixed demo candidate set" in flat
+    assert "This is bundled sample data" in flat
+    assert "fixed demo candidate set" not in flat
     assert "your own logs" in flat
 
 

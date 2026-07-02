@@ -126,36 +126,35 @@ class TestDefaultCandidatePoolIsRated:
         )
 
 
-class TestDemoCandidatePool:
-    def test_demo_candidates_pool_is_subset_of_priced_and_rated(self) -> None:
-        from frugon.cost import _DEMO_CANDIDATES
+class TestDemoMeasureCandidate:
+    """FRG-OSS-034 Phase 3: the demo no longer pins a separate RECOMMENDATION
+    pool (--demo uses the SAME default _ROUTING_CANDIDATES pool as a real run).
+    The one remaining pin, _DEMO_MEASURE_CANDIDATE, scopes ONLY which single
+    model ``--demo --measure`` samples (so the try-out path needs just
+    OPENAI_API_KEY) — it must still be priced and rated like any real candidate."""
+
+    def test_demo_measure_candidate_is_priced_and_rated(self) -> None:
+        from frugon.cost import _DEMO_MEASURE_CANDIDATE
 
         tier_map = _load_bundled_tier_map()
         priced_keys = _load_bundled_pricing_keys()
-        unrated = [m for m in _DEMO_CANDIDATES if not _is_rated_in_bundled_seed(m, tier_map)]
-        unpriced = [m for m in _DEMO_CANDIDATES if m not in priced_keys]
-        assert unrated == [], (
-            f"Demo pool contains unrated model(s): {unrated}. "
-            "All demo candidates must be rated in the bundled quality seed."
+        assert _is_rated_in_bundled_seed(_DEMO_MEASURE_CANDIDATE, tier_map), (
+            f"_DEMO_MEASURE_CANDIDATE={_DEMO_MEASURE_CANDIDATE!r} is not rated "
+            "in the bundled quality seed."
         )
-        assert unpriced == [], (
-            f"Demo pool contains unpriced model(s): {unpriced}. "
-            "All demo candidates must be priced in the bundled pricing seed."
+        assert _DEMO_MEASURE_CANDIDATE in priced_keys, (
+            f"_DEMO_MEASURE_CANDIDATE={_DEMO_MEASURE_CANDIDATE!r} is not priced "
+            "in the bundled pricing seed."
         )
 
-    def test_demo_candidates_unchanged(self) -> None:
-        from frugon.cost import _DEMO_CANDIDATES
+    def test_demo_measure_candidate_needs_only_openai_key(self) -> None:
+        """The whole point of the pin: it must be an OpenAI model, so --demo
+        --measure needs only OPENAI_API_KEY set."""
+        from frugon.cost import _DEMO_MEASURE_CANDIDATE
 
-        assert _DEMO_CANDIDATES == [
-            "claude-sonnet-4-5",
-            "gpt-4.1",
-            "claude-haiku-4-5",
-            "gemini-2.5-flash",
-            "gpt-4.1-mini",
-        ], (
-            "Pinning test: _DEMO_CANDIDATES changed unexpectedly. "
-            "Changing the demo pool will alter committed demo numbers. "
-            "Update this test and regenerate the demo GIF if this is intentional."
+        assert _DEMO_MEASURE_CANDIDATE.startswith("gpt-"), (
+            f"_DEMO_MEASURE_CANDIDATE={_DEMO_MEASURE_CANDIDATE!r} must be an "
+            "OpenAI model so --demo --measure needs only OPENAI_API_KEY."
         )
 
 

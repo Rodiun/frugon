@@ -358,7 +358,7 @@ def test_analyze_demo_shows_split_shape() -> None:
     assert "easy calls" in out
     assert "Keep" in out
     assert "hard calls" in out
-    assert "gpt-4.1-mini" in out
+    assert "deepseek-v4-flash" in out
 
 
 def test_analyze_wholesale_flag_suppresses_split() -> None:
@@ -484,7 +484,7 @@ def test_help_tokens_found_at_narrow_width() -> None:
 
 
 def test_analyze_demo_swap_line_names_both_models() -> None:
-    """Arrange: analyze --demo --wholesale (gpt-5.5 baseline → gemini-2.5-flash candidate).
+    """Arrange: analyze --demo --wholesale (gpt-5.5 baseline → deepseek-v4-flash candidate).
     Act: run.
     Assert: the output contains a swap line with both model names, making
             the recommendation explicit (not just showing the candidate).
@@ -494,22 +494,22 @@ def test_analyze_demo_swap_line_names_both_models() -> None:
     exercises the wholesale path explicitly via --wholesale.
 
     For wholesale (full-swap basis) the cheapest qualified candidate on the gpt-5.5
-    demo log is gemini-2.5-flash (Elite tier 0, $0.30/$2.50 per 1M tokens), which
+    demo log is deepseek-v4-flash (Strong tier 1, $0.14/$0.28 per 1M tokens), which
     wins because it has the lowest blended per-token price within the 1-tier-drop
-    constraint.  The split path routes easy calls to gpt-4.1-mini; wholesale routes
-    every call to gemini-2.5-flash.
+    constraint.  Both the split path (easy calls) and wholesale (every call) route
+    to the same deepseek-v4-flash on this fixture.
     """
     result = runner.invoke(app, ["analyze", "--demo", "--wholesale"])
 
     assert result.exit_code == 0, f"Expected exit 0:\n{result.output}"
     out = _clean(result.output)
     # The hero must name BOTH the baseline (gpt-5.5, in the masthead) and the
-    # candidate (gemini-2.5-flash, on the full-swap line), making the recommendation explicit.
+    # candidate (deepseek-v4-flash, on the full-swap line), making the recommendation explicit.
     assert "gpt-5.5" in out, (
         f"Expected baseline model 'gpt-5.5' in output:\n{result.output}"
     )
-    assert "gemini-2.5-flash" in out, (
-        f"Expected candidate model 'gemini-2.5-flash' in output:\n{result.output}"
+    assert "deepseek-v4-flash" in out, (
+        f"Expected candidate model 'deepseek-v4-flash' in output:\n{result.output}"
     )
     # The redesigned full-swap line reads "Swap   every call  →  <model>   (full swap)".
     assert "Swap" in out, (

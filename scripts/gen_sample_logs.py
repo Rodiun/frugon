@@ -13,14 +13,18 @@ personal dev log:
     over a one-month window.
   * The bulk are routine, short calls — classification, routing, Q&A, short
     summaries, translations — that frugon's per-call difficulty classifier marks
-    EASY and proposes routing to the demo pool's cheapest rated candidate,
-    ``gpt-4.1-mini`` — a genuine quality-tier step-down with a compelling saving.
+    EASY and proposes routing to the DEFAULT roster's cheapest quality-preserving
+    candidate (see ``_RECOMMENDED_CANDIDATE`` below — computed against the live
+    ``_ROUTING_CANDIDATES`` pool, the SAME pool a real ``frugon analyze`` run
+    uses; the demo no longer pins a separate illustrative pool) — a genuine
+    quality-tier step-down with a compelling saving.
   * A minority are genuinely demanding calls — incident post-mortems, large
     multi-function reviews, long design-doc critiques, deep debugging — that the
     classifier KEEPS on the premium baseline.
-  * A slice of traffic is already running on ``gpt-4.1-mini`` — the very model
-    frugon recommends (a team part-way through that migration) — so the demo's
-    accounting reconciles *every* call: routed + kept + already-on-cheaper == analyzed.
+  * A slice of traffic is already running on ``_RECOMMENDED_CANDIDATE`` — the
+    very model frugon recommends (a team part-way through that migration) — so
+    the demo's accounting reconciles *every* call: routed + kept +
+    already-on-cheaper == analyzed.
 
 Determinism (binding):
   The dataset is built by a fixed, seeded, deterministic procedure — corpus
@@ -143,7 +147,7 @@ def _count_tokens(text: str, model: str) -> int:
 
 # ---------------------------------------------------------------------------
 # EASY corpus — short, routine calls the classifier proposes routing to the
-# cheaper demo pick (gpt-4.1-mini).
+# cheaper recommended candidate (see ``_RECOMMENDED_CANDIDATE`` below).
 #
 # These are real, realistic support / assistant tasks.  Each is padded to a
 # fixed, modest target size that keeps the difficulty score below the easy
@@ -354,19 +358,38 @@ HARD_SEEDS = [
 # saving and a total "Current" that equals the sum of the per-model cost rows.
 #
 # Baseline: gpt-5.5 at $5/$30 per 1M tokens (Elite quality, tier 0).
-# Recommended candidate (the demo pool's cheapest rated model): gpt-4.1-mini —
-# a genuine quality-tier step-down with a compelling saving, exactly the coherent
-# story frugon is built to tell.  A slice of traffic is already pre-migrated to
-# that same gpt-4.1-mini (see N_CANDIDATE) so the accounting reconciles every call.
+#
+# Recommended candidate: computed FRESH from the live default pool
+# (_ROUTING_CANDIDATES, the same pool a real ``frugon analyze`` run uses — the
+# demo pins no separate illustrative pool) via select_easy_target(), NEVER
+# hand-picked.  This is a fixed-point pin: run the analysis on the current
+# fixture, see which candidate wins, set _RECOMMENDED_CANDIDATE to that model,
+# regenerate, and re-check the winner is unchanged (converges in <=2 iterations
+# for a genuinely stable winner).  Ties break by MODEL NAME (lexicographic),
+# for determinism — see select_easy_target() in routing.py, NOT by whichever
+# model happens to save more on its own fixture.  A genuine quality-tier
+# step-down with a compelling saving, exactly the coherent story frugon is
+# built to tell.  A slice of traffic is already pre-migrated to that same
+# candidate (see N_CANDIDATE) so the accounting reconciles every call.
+#
+# Fixed-point winner as of the FRG-OSS-034 Phase 3+4 seed refresh (2026-07-02):
+# deepseek-v4-flash (blended $0.14/$0.28 per 1M tokens, tier 1 — one tier below
+# the gpt-5.5 baseline's tier 0), beating llama-4-scout-17b-16e-instruct
+# (blended $0.11/$0.34, tier 3) on blended per-token price under the routing
+# selector's quality-preserving constraint (max_tier_drop=1) — llama-4-scout's
+# tier-3 rating exceeds that constraint from a tier-0 baseline, so it is not
+# eligible even though its raw blended price is close.  No tie to break this
+# cycle: deepseek-v4-flash is the outright cheapest ELIGIBLE candidate.
+_RECOMMENDED_CANDIDATE = "deepseek-v4-flash"
 #
 # Total monthly spend lands in the hundreds-to-low-thousands register with an
 # honest 30-40% blended saving.  Per-call costs are uniform per seed-group
 # (deterministic padding), so these counts pin the totals precisely.  The exact
 # routed/kept/blended/saving figures are printed by _report_stats from the engine
 # on every run and asserted by the test suite, so they can never silently drift.
-N_TURBO_EASY = 36100  # routine gpt-5.5 calls — frugon proposes routing these to gpt-4.1-mini
+N_TURBO_EASY = 36100  # routine gpt-5.5 calls — frugon proposes routing these to _RECOMMENDED_CANDIDATE
 N_TURBO_HARD = 10000  # genuinely hard gpt-5.5 calls — kept on baseline
-N_CANDIDATE = 10000  # a slice already migrated to gpt-4.1-mini, the recommended model (not part of the split)
+N_CANDIDATE = 10000  # a slice already migrated to _RECOMMENDED_CANDIDATE (not part of the split)
 
 WINDOW_DAYS = 30
 
@@ -475,7 +498,7 @@ def generate(output_path: Path) -> None:
     candidate_cycle: itertools.cycle[int] = itertools.cycle(range(len(EASY_SEEDS)))
     for _ in range(N_CANDIDATE):
         i = next(candidate_cycle)
-        plan.append((i, EASY_SEEDS[i], "gpt-4.1-mini"))
+        plan.append((i, EASY_SEEDS[i], _RECOMMENDED_CANDIDATE))
 
     total = len(plan)
 
@@ -524,18 +547,20 @@ def generate(output_path: Path) -> None:
 def _report_stats(records: list[dict]) -> None:
     """Print the honest split + wholesale figures from the REAL frugon engine.
 
-    Uses frugon.cost.analyze_records with the demo candidate pool (the same pool
-    `frugon analyze --demo` pins), so the printed candidate and figures come from
-    the same analysis that backs the demo — no hand-maintained arithmetic that
-    could drift from the engine.  These are the engine's raw split fields; the
-    demo's displayed dollars are reconciled to 2dp (per the §2a reconciling
-    invariant), so a printed figure can round a hair differently from the demo.
+    Uses frugon.cost.analyze_records with candidates=None, so it falls back to
+    the SAME default _ROUTING_CANDIDATES pool `frugon analyze --demo` now uses
+    (demo == production — no demo-only pin) — the printed candidate and figures
+    come from the same analysis that backs the demo — no hand-maintained
+    arithmetic that could drift from the engine.  These are the engine's raw
+    split fields; the demo's displayed dollars are reconciled to 2dp (per the
+    §2a reconciling invariant), so a printed figure can round a hair
+    differently from the demo.
     """
-    from frugon.cost import _DEMO_CANDIDATES, analyze_records, compute_saving_pct, parse_record
+    from frugon.cost import analyze_records, compute_saving_pct, parse_record
 
     parsed = [parse_record(r) for r in records]
     log_records = [r for r in parsed if r is not None]
-    result = analyze_records(log_records, candidates=_DEMO_CANDIDATES)
+    result = analyze_records(log_records, candidates=None)
 
     print(
         f"Analyzed {result.priced_calls} priced calls; "

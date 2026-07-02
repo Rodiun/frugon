@@ -1,5 +1,5 @@
 {
-  "_last_synced": "2026-06-18",
+  "_last_synced": "2026-07-02",
   "_source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
   "_note": "Models listed here take precedence over tokencost for pricing. Sync with: frugon pricing update",
   "gpt-4o": {

@@ -261,10 +261,70 @@ def _shown_quality_phrase(result: AnalysisResult | None) -> str:
     (``tier_drop is None``) the panel said "within tolerance".  Threading this
     helper through every synthesis back-reference keeps them truthful regardless
     of which branch fired — the §6 honesty invariant on the --judge path.
+
+    CAUTION: this phrase is only meaningful for the model the offline panel
+    actually recommended (``result.split.candidate_model`` / ``result.candidate_model``).
+    A caller measuring a DIFFERENT model (e.g. ``--demo --measure``'s pinned
+    try-out candidate) must not attribute this phrase to that model — see
+    :func:`_measured_model_is_the_recommendation` and
+    :func:`_recommendation_divergence_note`.
     """
     if result is not None and _is_equal_or_better_quality(result):
         return "same or better quality"
     return "within tolerance"
+
+
+def _recommended_model(result: AnalysisResult | None) -> str | None:
+    """Return the model the offline panel actually recommended for *result*.
+
+    Single source of truth for "the headline recommendation" — the per-call
+    split's candidate when a split exists, else the wholesale candidate.
+    Mirrors the resolution cli.py uses when defaulting --measure's candidate
+    (measure_candidates' default_candidate), so this always names the SAME
+    model the routing panel's hero line showed.
+    """
+    if result is None:
+        return None
+    if result.split is not None and result.split.candidate_model:
+        return result.split.candidate_model
+    return result.candidate_model
+
+
+def _measured_model_is_the_recommendation(
+    measured_model: str, result: AnalysisResult | None
+) -> bool:
+    """True iff *measured_model* is the SAME model the offline panel recommended.
+
+    False when the caller measured a model other than the headline
+    recommendation — the case ``--demo --measure`` exercises via its pinned
+    single try-out candidate (``_DEMO_MEASURE_CANDIDATE``), which is chosen
+    only so the demo's try-out path needs a single provider key, and is NOT
+    necessarily the model the offline panel recommends.  Also False when
+    *result* carries no recommendation to compare against.
+    """
+    recommended = _recommended_model(result)
+    return recommended is not None and measured_model == recommended
+
+
+def _recommendation_divergence_note(measured_model: str, result: AnalysisResult | None) -> str | None:
+    """Return a disclosure sentence when *measured_model* != the headline recommendation.
+
+    Returns ``None`` when the measured model IS the recommendation (the common
+    case — no disclosure needed) or when there is no recommendation to compare
+    against.  When they diverge, callers must render this note ALONGSIDE the
+    verdict rather than let the verdict imply the headline recommendation was
+    verified — the honesty gap this guards is a sample-model's offline-quality
+    phrase being silently attributed to a different model the panel actually
+    recommends (§6 honesty invariant).
+    """
+    recommended = _recommended_model(result)
+    if recommended is None or measured_model == recommended:
+        return None
+    return (
+        f"{measured_model} is the demo's try-out sample model, not the headline "
+        f"recommendation ({recommended}); this verifies the --measure flow, not "
+        "the recommended switch."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2464,6 +2524,17 @@ def _classify_verdict(
         )
     loss_fraction = tally.losses / scored
     if held > tally.losses and loss_fraction < _VERDICT_BORDERLINE_LOSS_FRACTION:
+        divergence = _recommendation_divergence_note(tally.candidate, result)
+        if divergence is not None:
+            # The measured model is NOT the headline recommendation (e.g. the
+            # demo's pinned try-out candidate) — do not back-reference the
+            # RECOMMENDATION's offline quality phrase against a different
+            # model. Disclose the divergence instead (§6 honesty invariant).
+            return (
+                _VERDICT_CONFIRMED,
+                f"Estimate confirmed: {tally.candidate} held quality in "
+                f"{held:,}/{scored:,} sampled prompt(s). {divergence}",
+            )
         _quality_phrase = _shown_quality_phrase(result)
         return (
             _VERDICT_CONFIRMED,
@@ -2565,13 +2636,25 @@ def _render_tier1_synthesis(
                 f"{tally.candidate}.[/{CAUTION_AMBER}]"
             )
         elif state == _VERDICT_CONFIRMED:
-            _quality_phrase = _shown_quality_phrase(result)
-            rprint(
-                f"[{BRAND_CYAN}]Estimate {status}:[/{BRAND_CYAN}] "
-                f"[cyan]{tally.candidate}[/cyan] held quality in "
-                f"[bold]{held:,}/{scored:,}[/bold] sampled prompt(s) "
-                f"(offline [dim]'{_quality_phrase}'[/dim] → verified on your data)."
-            )
+            divergence = _recommendation_divergence_note(tally.candidate, result)
+            if divergence is not None:
+                # The measured model is NOT the headline recommendation — never
+                # back-reference the RECOMMENDATION's offline quality phrase
+                # against a different model (§6 honesty invariant).
+                rprint(
+                    f"[{BRAND_CYAN}]Estimate {status}:[/{BRAND_CYAN}] "
+                    f"[cyan]{tally.candidate}[/cyan] held quality in "
+                    f"[bold]{held:,}/{scored:,}[/bold] sampled prompt(s). "
+                    f"[dim]{divergence}[/dim]"
+                )
+            else:
+                _quality_phrase = _shown_quality_phrase(result)
+                rprint(
+                    f"[{BRAND_CYAN}]Estimate {status}:[/{BRAND_CYAN}] "
+                    f"[cyan]{tally.candidate}[/cyan] held quality in "
+                    f"[bold]{held:,}/{scored:,}[/bold] sampled prompt(s) "
+                    f"(offline [dim]'{_quality_phrase}'[/dim] → verified on your data)."
+                )
         elif state == _VERDICT_BORDERLINE:
             rprint(
                 f"[{CAUTION_AMBER}]Estimate {status}: "
@@ -2635,17 +2718,32 @@ def _render_tier0_framing(
     *result* is the :class:`AnalysisResult` that drove the routing panel; it
     selects the quality phrase actually shown to the user ("same or better
     quality" vs "within tolerance") so this back-reference is always truthful
-    (§6 honesty invariant on the --measure-only path).
+    (§6 honesty invariant on the --measure-only path).  When *measure_result*
+    sampled a model OTHER than the panel's headline recommendation (e.g. the
+    demo's pinned try-out candidate), the offline phrase belongs to a
+    different model — this framing discloses that instead of back-referencing
+    it (same §6 invariant the Tier-1 verdict enforces).
     """
     candidates = measure_result.candidates
     named = candidates[0] if len(candidates) == 1 else "the candidate"
-    _quality_phrase = _shown_quality_phrase(result)
-    rprint(
-        f"\n[dim]These are raw side-by-side outputs for you to compare "
-        f"({named} vs {measure_result.current_model}). "
-        f"'{_quality_phrase}' above is an offline estimate — "
-        f"run [/dim][cyan]--judge[/cyan][dim] for a scored verdict.[/dim]"
-    )
+    if len(candidates) == 1:
+        divergence = _recommendation_divergence_note(candidates[0], result)
+    else:
+        divergence = None
+    if divergence is not None:
+        rprint(
+            f"\n[dim]These are raw side-by-side outputs for you to compare "
+            f"({named} vs {measure_result.current_model}). {divergence} "
+            f"Run [/dim][cyan]--judge[/cyan][dim] for a scored verdict.[/dim]"
+        )
+    else:
+        _quality_phrase = _shown_quality_phrase(result)
+        rprint(
+            f"\n[dim]These are raw side-by-side outputs for you to compare "
+            f"({named} vs {measure_result.current_model}). "
+            f"'{_quality_phrase}' above is an offline estimate — "
+            f"run [/dim][cyan]--judge[/cyan][dim] for a scored verdict.[/dim]"
+        )
 
 
 # ---------------------------------------------------------------------------

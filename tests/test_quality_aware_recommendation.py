@@ -116,12 +116,14 @@ def test_excluded_unrated_caveat_present_with_real_saving_pct() -> None:
     )
     assert caveat is not None, messages
     assert "frugon-eval-unrated-x1" in caveat
-    # The percentage matches the unrated candidate's block saving% (31.1%).
+    # The percentage matches the unrated candidate's block saving% (31.2%).
     # Derived from _demo_result(["gpt-4o","frugon-eval-unrated-x1"]) with the
-    # gpt-5.5 baseline; updated when the demo baseline was modernised (gpt-5.5
-    # is pricier than the former gpt-4o baseline, raising the unrated candidate's
-    # apparent block saving from 26.5% to 31.1%).
-    assert "31.1%" in caveat
+    # gpt-5.5 baseline; updated by the FRG-OSS-034 Phase 3+4 seed refresh +
+    # demo-fixture rebuild (2026-07-02), which shifted the already-migrated
+    # slice from gpt-4.1-mini to deepseek-v4-flash and moved every derived
+    # total, raising the unrated candidate's apparent block saving from 31.1%
+    # to 31.2%.
+    assert "31.2%" in caveat
     # Only --judge yields the scored verdict that unlocks the model.
     assert "--measure --judge --candidates frugon-eval-unrated-x1" in caveat
     assert "unlock it as the recommendation" in caveat

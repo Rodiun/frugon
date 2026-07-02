@@ -125,7 +125,7 @@ def test_pd_scenario_recommended_row_equals_headline_newspend_to_the_cent() -> N
     )
     # Spot-check the known-good DISPLAY figure (gpt-5.5 demo, 30-day span);
     # since v0.1.3 renderers display at 2 dp, but the underlying Decimal is unchanged.
-    assert headline_newspend.quantize(Decimal("0.0001")) == Decimal("424.9352")
+    assert headline_newspend.quantize(Decimal("0.0001")) == Decimal("422.2099")
 
 
 def test_pd_scenario_claude_haiku_shows_exactly_one_number() -> None:
@@ -133,7 +133,7 @@ def test_pd_scenario_claude_haiku_shows_exactly_one_number() -> None:
 
     The unrated candidate is held out of the recommended route (Change 1) but is
     still surfaced in the block with its REAL full-dataset split New-spend
-    ($380.5502) — the one number routing easy→frugon-eval-unrated-x1 would cost — so the
+    ($377.8249) — the one number routing easy→frugon-eval-unrated-x1 would cost — so the
     user can see the potential.  Its block figure equals the figure the Change-1b
     caveat quotes.
     """
@@ -142,7 +142,7 @@ def test_pd_scenario_claude_haiku_shows_exactly_one_number() -> None:
     assert haiku.monthly_cost is not None
     haiku_display = haiku.monthly_cost.quantize(Decimal("0.0001"))
     # The full-dataset New-spend of routing easy→frugon-eval-unrated-x1.
-    assert haiku_display == Decimal("380.5502")
+    assert haiku_display == Decimal("377.8249")
     # The old dominant-only compute_split figure must NOT be what we show.
     assert haiku_display != Decimal("387.0000")
 
@@ -156,19 +156,19 @@ def test_pd_scenario_renders_consistently_on_terminal_and_html(
     render_terminal(result)
     out = " ".join(capsys.readouterr().out.split())
     # Headline routes to the rated pick gpt-4o at the reconciled New-spend.
-    # Since v0.1.3, amounts >= $0.01 display at 2 dp: $424.9352 -> $424.94.
+    # Since v0.1.3, amounts >= $0.01 display at 2 dp: $422.2099 -> $422.21.
     assert "gpt-4o" in out
-    assert "424.94" in out
+    assert "422.21" in out
     # frugon-eval-unrated-x1 appears once (considered), at its full-dataset figure.
-    # $380.5502 -> $380.55 at 2 dp.
+    # $377.8249 -> $377.82 at 2 dp.
     assert "frugon-eval-unrated-x1" in out
-    assert "380.55" in out
+    assert "377.82" in out
 
     html_path = tmp_path / "r.html"
     render_html(result, html_path)
     html = html_path.read_text(encoding="utf-8")
-    assert "380.55" in html
-    assert "424.94" in html
+    assert "377.82" in html
+    assert "422.21" in html
 
 
 # ---------------------------------------------------------------------------
