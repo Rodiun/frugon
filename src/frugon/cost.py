@@ -519,25 +519,47 @@ def _compute_span_days(records: list[LogRecord]) -> float | None:
 # than the baseline, within the tier constraint.  The list is ordered from
 # "minimal quality step-down" to "maximum cost reduction" so the
 # recommendation is conservative.  Users can override with --candidates.
+#
+# 23-model roster (FRG-OSS-034) spanning 11 vendors: OpenAI, Anthropic,
+# Google, DeepSeek, Moonshot, xAI, Mistral, Z.ai, MiniMax, Alibaba, Meta (OSS).
+# Every entry is priced (src/frugon/data/pricing.json) and rated
+# (src/frugon/data/quality.json, some via the effort/date folds in model_id.py)
+# — see tests/test_candidate_pool.py for the roster invariant.
 _ROUTING_CANDIDATES = [
     # Tier 0 — Elite (minimal quality step-down from typical baselines)
-    "claude-sonnet-4-6",
-    "claude-opus-4-7",
-    "claude-opus-4-8",
-    "deepseek-v4-pro",
     "gpt-5.5",
+    "claude-opus-4-8",
+    "gemini-2.5-pro",
+    "deepseek-v4-pro",
+    "kimi-k2.6",
     # Tier 1 — Strong (meaningful cost reduction, still high quality)
+    "o3",
+    "claude-sonnet-4-6",
+    "gemini-2.5-flash",
     "deepseek-v3.2",
     "deepseek-v4-flash",
-    "gemini-2.5-flash",
+    "grok-4",
+    "mistral-large-3",
+    "glm-4.6",
     "minimax-m3",
     # Tier 2 — Capable (maximum cost reduction)
+    "gpt-4.1-mini",
+    "gpt-4o-mini",
+    "gpt-4.1-nano",
     "claude-haiku-4-5",
+    "grok-3-mini",
+    "glm-4.5-air",
+    "qwen-max",
+    # Reference-host pricing: no first-party per-token price is published for
+    # these two OSS Llama-4 checkpoints, so the seed prices them via Groq (a
+    # commonly-used inference host) rather than inventing a number (§2a).
+    "llama-4-maverick-17b-128e-instruct",
+    "llama-4-scout-17b-16e-instruct",
 ]
 
 # Pinned demo candidate pool — keeps the --demo recommendation and every
 # committed demo number numerically identical as the default pool evolves.
-# --demo --measure stays single-OpenAI-key.  Real users get the 10-model pool.
+# --demo --measure stays single-OpenAI-key.  Real users get the full 23-model pool.
 _DEMO_CANDIDATES: list[str] = [
     "claude-sonnet-4-5",
     "gpt-4.1",

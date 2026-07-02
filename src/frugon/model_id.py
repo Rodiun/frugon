@@ -4,12 +4,47 @@ Three pure, deterministic, I/O-free functions:
 
 canonicalize(model)
     Strips known gateway/provider prefixes (OpenRouter, Azure, Bedrock,
-    Vertex AI, etc.) iteratively and normalises the Bedrock dotted+versioned
-    form (anthropic.claude-3-5-sonnet-20241022-v1:0) and the Vertex AI
+    Vertex AI, Moonshot, xAI, Mistral, Z.ai, MiniMax, Alibaba/DashScope/Qwen,
+    etc.) iteratively and normalises the Bedrock dotted+versioned form
+    (anthropic.claude-3-5-sonnet-20241022-v1:0) and the Vertex AI
     ``@version`` pin form (anthropic.claude-haiku-4-5@20251001).
     Bedrock regional prefixes (us., eu., apac.) are stripped before vendor
     folding.  Output is always lowercase (registry keys are lowercase).
     Idempotent for already-bare names.
+
+    A "meta-llama/" (HYPHEN) org-path segment is folded ONLY when it
+    immediately follows a stripped "groq/" prefix (Groq's Llama-4 wire form
+    nests the org segment, but Groq's own lookup keys never carry it) — it is
+    deliberately NOT a member of the generic prefix list, because
+    "together_ai/" has a separate, tested contract that preserves the org
+    segment of its "org/model" wire form as a single unit — e.g.
+    "together_ai/meta-llama/Llama-3-70b-chat-hf" stays
+    "meta-llama/llama-3-70b-chat-hf", and likewise for other model-hosting
+    orgs such as "mistralai/" and "deepseek-ai/".
+
+    That contract has an INTENTIONAL, documented exception: when the org
+    token nested under "together_ai/" is ITSELF one of frugon's first-class
+    provider prefixes (currently "qwen/", "moonshotai/", "z-ai/", "minimax/"),
+    it strips like any other occurrence of that prefix and the model
+    normalises to its bare form — e.g.
+    "together_ai/Qwen/Qwen2.5-72B-Instruct-Turbo" ->
+    "qwen2.5-72b-instruct-turbo", NOT "qwen/qwen2.5-72b-instruct-turbo".
+    This asymmetry is deliberate: frugon's pricing/quality seeds key these
+    models by their BARE name (no org prefix), so folding away the org token
+    is what makes the together_ai wire form resolve against the seed at all;
+    "mistralai/" and "deepseek-ai/" are not in that prefix set (frugon has no
+    generic "mistralai/" or "deepseek-ai/" strip — Mistral direct traffic
+    already arrives as "mistral/"), so those orgs keep their preserved-path
+    behaviour unchanged.  See
+    test_canonicalize_together_ai_provider_org_asymmetry in test_model_id.py
+    for the pinned cases on both sides of this rule.
+
+    A "meta_llama/" (UNDERSCORE) org-path segment IS a member of the generic
+    prefix list and strips unconditionally in every position, including
+    directly under "together_ai/" — it is LiteLLM's first-party Meta
+    provider prefix and never appears as a together_ai-nested org segment in
+    practice, so no together_ai exception is needed for it (unlike the
+    hyphen form).
 
 base_family(model)
     Folds a dated/versioned snapshot to its base model family by stripping
@@ -63,7 +98,44 @@ _PREFIXES: tuple[str, ...] = (
     "xai/",
     "gemini/",
     "google/",
+    "moonshot/",
+    "moonshotai/",
+    "zai/",
+    "z-ai/",
+    "minimax/",
+    "dashscope/",
+    "qwen/",
+    "alibaba/",
+    # LiteLLM's first-party Meta provider prefix (underscore form).  Unlike the
+    # HYPHEN form "meta-llama/" (see _GROQ_META_LLAMA_RE below), this one never
+    # appears as a nested together_ai org segment, so it is safe as a generic,
+    # unconditional strip.
+    "meta_llama/",
 )
+
+# Meta-llama org-path prefix (HYPHEN form ONLY), stripped ONLY immediately
+# after a "groq/" strip (e.g. "groq/meta-llama/llama-4-scout-17b-16e-instruct"
+# -> the bare model name).  Deliberately NOT a member of the generic iterative
+# _PREFIXES tuple: "together_ai/" has a documented, tested contract that
+# preserves most org/model paths as a single unit (e.g.
+# "together_ai/meta-llama/Llama-3-70b-chat-hf" -> "meta-llama/llama-3-70b-chat-hf",
+# see test_model_id.py), so a generic "meta-llama/" strip would silently break
+# that contract by eating the org segment regardless of which gateway it
+# arrived through.  Scoping the strip to "right after groq/" gives Groq's
+# wire form (which does NOT preserve the org segment for our lookup keys) the
+# fold it needs without touching together_ai's differently-documented form.
+#
+# Ownership split (P2-2): this scoped regex owns ONLY the HYPHEN form
+# ("meta-llama/") — the together_ai-colliding shape.  The UNDERSCORE form
+# ("meta_llama/") is a member of the generic _PREFIXES tuple instead (it never
+# collides with a together_ai org segment — see that tuple's comment) and is
+# stripped by the ordinary iterative loop.  For "groq/meta_llama/...", the
+# generic loop strips "groq/" then, on its next iteration, strips
+# "meta_llama/" via the same generic mechanism — this scoped regex never
+# fires for the underscore form (its pattern no longer matches it), so there
+# is exactly one owning code path per form, not two racing to strip the same
+# input.
+_GROQ_META_LLAMA_RE = re.compile(r"^meta-llama/")
 
 # Bedrock vendor: one letter followed by zero or more letters/digits (no hyphens).
 # Matches "anthropic", "amazon", "ai21", "meta", "cohere", etc.
@@ -185,6 +257,13 @@ def canonicalize(model: str) -> str:
         if consumed is None:
             break
         current = consumed
+        if prefix == "groq/":
+            # Groq's Llama-4 wire form nests the org segment
+            # ("groq/meta-llama/llama-4-scout-...") but Groq's own lookup keys
+            # never carry it, so fold it away right after the groq/ strip —
+            # see _GROQ_META_LLAMA_RE's docstring for why this is scoped here
+            # rather than added to the generic _PREFIXES tuple.
+            current = _GROQ_META_LLAMA_RE.sub("", current)
 
     # --- Strip Bedrock regional prefix then normalise vendor.model form ---
     # Handles both Bedrock -vN:M and Vertex AI @version pin on the model part.

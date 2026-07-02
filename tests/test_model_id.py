@@ -69,6 +69,40 @@ class TestCanonicalize:
             # --- together_ai/ (single prefix, org/model path preserved; lowercased) ---
             # --- fireworks_ai/ ---
             ("fireworks_ai/llama-v3p1-405b-instruct", "llama-v3p1-405b-instruct"),
+            # --- FRG-OSS-034 new-vendor gateway prefixes ---
+            ("moonshot/kimi-k2.6", "kimi-k2.6"),
+            ("moonshotai/kimi-k2.6", "kimi-k2.6"),
+            ("openrouter/moonshotai/kimi-k2.6", "kimi-k2.6"),
+            ("zai/glm-4.6", "glm-4.6"),
+            ("z-ai/glm-4.6", "glm-4.6"),
+            ("openrouter/z-ai/glm-4.6", "glm-4.6"),
+            ("minimax/minimax-m3", "minimax-m3"),
+            ("minimax/MiniMax-M3", "minimax-m3"),
+            ("dashscope/qwen-max", "qwen-max"),
+            ("qwen/qwen-max", "qwen-max"),
+            ("alibaba/qwen-max", "qwen-max"),
+            # groq/meta-llama/... strips BOTH segments (Groq's own lookup keys
+            # never carry the org prefix) — iterative stripping via the
+            # groq-scoped meta-llama fold, not a generic _PREFIXES entry.
+            (
+                "groq/meta-llama/llama-4-scout-17b-16e-instruct",
+                "llama-4-scout-17b-16e-instruct",
+            ),
+            (
+                "groq/meta-llama/llama-4-maverick-17b-128e-instruct",
+                "llama-4-maverick-17b-128e-instruct",
+            ),
+            (
+                "groq/meta_llama/llama-4-scout-17b-16e-instruct",
+                "llama-4-scout-17b-16e-instruct",
+            ),
+            # --- P2-1: meta_llama/ (UNDERSCORE) is a generic _PREFIXES member,
+            # unlike the hyphen form, and strips unconditionally ---
+            ("meta_llama/llama-4-scout-17b-16e-instruct", "llama-4-scout-17b-16e-instruct"),
+            (
+                "openrouter/meta_llama/llama-4-scout-17b-16e-instruct",
+                "llama-4-scout-17b-16e-instruct",
+            ),
             # --- bedrock/ + dotted+versioned form ---
             ("bedrock/anthropic.claude-3-5-sonnet-20241022-v1:0", "claude-3-5-sonnet-20241022"),
             ("bedrock/anthropic.claude-3-opus-20240229-v1:0", "claude-3-opus-20240229"),
@@ -169,6 +203,77 @@ class TestCanonicalize:
         first = canonicalize("openai/gpt-4o")
         second = canonicalize(first)
         assert first == second == "gpt-4o"
+
+    def test_canonicalize_idempotent_new_vendor_prefixes(self) -> None:
+        """Arrange: FRG-OSS-034 new-vendor gateway-prefixed models.
+        Act: canonicalize twice.
+        Assert: double-canonicalize is stable for every new prefix class,
+        including the groq/meta-llama/... double-strip.
+        """
+        from frugon.model_id import canonicalize
+
+        inputs = [
+            "moonshot/kimi-k2.6",
+            "openrouter/moonshotai/kimi-k2.6",
+            "openrouter/z-ai/glm-4.6",
+            "dashscope/qwen-max",
+            "groq/meta-llama/llama-4-scout-17b-16e-instruct",
+            "groq/meta-llama/llama-4-maverick-17b-128e-instruct",
+        ]
+        for model in inputs:
+            first = canonicalize(model)
+            second = canonicalize(first)
+            assert first == second, (
+                f"canonicalize not idempotent for {model!r}: "
+                f"first={first!r}, second={second!r}"
+            )
+
+    def test_canonicalize_together_ai_meta_llama_org_path_preserved(self) -> None:
+        """Regression guard (FRG-OSS-034): adding a groq-scoped meta-llama/
+        fold must NOT make together_ai/ lose its documented org/model path
+        contract. together_ai/ preserves "meta-llama/..." as a single unit
+        (unlike groq/, whose lookup keys never carry the org segment).
+        """
+        from frugon.model_id import canonicalize
+
+        assert (
+            canonicalize("together_ai/meta-llama/Llama-3-70b-chat-hf")
+            == "meta-llama/llama-3-70b-chat-hf"
+        )
+
+    def test_canonicalize_together_ai_provider_org_asymmetry(self) -> None:
+        """Stage-1 P1-1: together_ai/ORG/model preserves the org segment
+        EXCEPT when ORG is itself one of frugon's first-class provider
+        prefixes (qwen/, moonshotai/, z-ai/, minimax/) — those normalize to
+        the bare model name because frugon's pricing/quality seeds key these
+        models bare, with no org prefix. This is a deliberate, documented
+        asymmetry (see the canonicalize() docstring), not a regression of
+        the together_ai org-path contract: mistralai/ and deepseek-ai/ are
+        NOT in frugon's provider-prefix set (Mistral direct traffic already
+        arrives as "mistral/", not "mistralai/"), so those orgs keep the
+        preserved-path behaviour unchanged.
+        """
+        from frugon.model_id import canonicalize
+
+        # --- Provider-org tokens normalize BARE (the org is dropped) ---
+        assert (
+            canonicalize("together_ai/Qwen/Qwen2.5-72B-Instruct-Turbo")
+            == "qwen2.5-72b-instruct-turbo"
+        )
+        assert (
+            canonicalize("together_ai/moonshotai/Kimi-K2-Instruct")
+            == "kimi-k2-instruct"
+        )
+
+        # --- Non-provider orgs stay PRESERVED as org/model ---
+        assert (
+            canonicalize("together_ai/mistralai/Mixtral-8x7B-Instruct-v0.1")
+            == "mistralai/mixtral-8x7b-instruct-v0.1"
+        )
+        assert (
+            canonicalize("together_ai/deepseek-ai/deepseek-coder")
+            == "deepseek-ai/deepseek-coder"
+        )
 
     def test_canonicalize_idempotent_region_prefix(self) -> None:
         """Arrange: region-prefixed Bedrock model.
