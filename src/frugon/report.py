@@ -24,6 +24,7 @@ from rich.text import Text
 from frugon.cost import (
     AnalysisResult,
     EscalationSuggestion,
+    _display_pct,
     compute_saving_pct,
     next_rung_up,
     window_contradicts_span,
@@ -789,11 +790,22 @@ _CANDIDATE_STATUS_LABEL = {
 def _candidate_caption(has_judge_section: bool) -> str:
     """Caption under the \"Candidates considered\" block.
 
-    The first sentence is invariant; the trailing clause is CONDITIONAL on
-    whether a per-candidate judge tally is actually rendered below this block
-    in the SAME output.  A cost-only report (no ``--measure --judge``) has no
-    such section, so the caption must not point \"below\" at a section that does
-    not exist — it offers the actionable command instead.
+    The first two sentences are invariant; the trailing clause is CONDITIONAL
+    on whether a per-candidate judge tally is actually rendered below this
+    block in the SAME output.  A cost-only report (no ``--measure --judge``)
+    has no such section, so the caption must not point \"below\" at a section
+    that does not exist — it offers the actionable command instead.
+
+    The first sentence names the axis the pick is ACTUALLY made on — the
+    biggest saving% — never "cheapest" (a dollar-column claim the recommended
+    row can visibly contradict: a display-tied candidate can print a lower
+    dollar figure than the recommended row and still lose, because the
+    recommendation is picked on saving% with a quality tie-break, not on the
+    dollar column alone — see :func:`frugon.cost._select_cheapest_eligible`).
+    The second sentence states the quality tie-break rule (PD-ratified
+    2026-07-02): when two rows print the SAME saving% at the precision shown,
+    the higher quality tier wins — the Quality tier column is what proves the
+    pick honest.
 
     Args:
         has_judge_section: True iff a Tier-1 judge tally (the per-candidate
@@ -801,8 +813,9 @@ def _candidate_caption(has_judge_section: bool) -> str:
     """
     base = (
         "Each candidate is shown under the same quality-preserving split (easy"
-        " calls to the candidate, hard calls kept on baseline); the cheapest"
-        " split is the headline recommendation."
+        " calls to the candidate, hard calls kept on baseline); the biggest"
+        " saving is the headline recommendation, and when savings tie at the"
+        " precision shown the higher quality tier wins."
     )
     if has_judge_section:
         return base + (
@@ -812,16 +825,54 @@ def _candidate_caption(has_judge_section: bool) -> str:
     return base + " Run --measure --judge to score each candidate's quality."
 
 
+def _candidate_cap_caption(result: AnalysisResult) -> str | None:
+    """Cap caption for the DEFAULT-pool "Candidates considered" block, or None.
+
+    The default pool (no explicit ``--candidates``) has up to 23 priced, rated
+    models — showing all of them would bury the recommendation, so the block
+    caps to the recommended candidate plus the next-4-cheapest that beat the
+    baseline (5 rows max; see ``analyze_records``).  This one honest line, shown
+    below the rows, tells the user the FULL pool was considered and how to see
+    more — it never replaces the existing pool-source notice (OpenRouter /
+    LiteLLM freshness line), which the CLI prints separately.
+
+    Returns None when the cap does not apply — an explicit ``--candidates`` run,
+    or a default-pool run where the block did not fire — so callers can skip the
+    line entirely rather than print a caption for a block that isn't capped.
+    """
+    if not result.used_default_pool:
+        return None
+    if len(result.candidate_projections) <= 1:
+        return None
+    pool_size = result.candidate_pool_size
+    shown = len(result.candidate_projections)
+    return (
+        f"{pool_size} candidates considered — showing the recommended split and "
+        f"the {shown - 1} next-cheapest. Pass --candidates to compare specific "
+        "models."
+    )
+
+
 def _fmt_candidate_saving(pct_val: Decimal) -> str:
     """Format a saving% for the candidates block.
 
     Positive pct_val means cheaper than baseline  -> "X.X% lower".
     Negative pct_val means more expensive          -> "X.X% higher".
+
+    Rounds via :func:`frugon.cost._display_pct` — the SAME Decimal
+    ROUND_HALF_UP quantizer the selector's display-precision tie-break reads
+    (:func:`frugon.cost._select_cheapest_eligible`) — rather than Python's
+    binary-float ``.1f`` (round-half-to-EVEN), which disagrees with
+    ROUND_HALF_UP at exact .x5 boundaries (e.g. 37.25 -> "37.2" under
+    round-half-even vs "37.3" under ROUND_HALF_UP).  Routing both the selector
+    and every renderer through one shared quantizer is what makes the
+    selector's tie-set PROVABLY the same set a reader sees printed — the whole
+    point of the caption-truth invariant.
     """
-    v = float(pct_val)
-    if v >= 0:
-        return f"{v:.1f}% lower"
-    return f"{abs(v):.1f}% higher"
+    quantized = _display_pct(pct_val)
+    if quantized >= 0:
+        return f"{quantized}% lower"
+    return f"{-quantized}% higher"
 
 
 def _render_candidates_considered_terminal(
@@ -831,9 +882,11 @@ def _render_candidates_considered_terminal(
 
     Borderless dim table (mirrors :func:) so it sits
     quietly under the framed decision/cost panel and above the
-    Accounting/Quality-tier/Prices rows.  Fires only when the user passed >1
-    candidate (len(result.candidate_projections) > 1) — otherwise no-op so
-    the single-candidate and --demo paths stay byte-identical.
+    Accounting/Quality-tier/Prices rows.  Fires whenever ``result`` carries
+    more than one candidate projection — either an explicit ``--candidates``
+    run with >1 model, or the default pool's capped transparency block (see
+    ``analyze_records``) — and is a no-op on the single-candidate path, so
+    that surface stays byte-identical.
     """
     projs = result.candidate_projections
     if len(projs) <= 1:
@@ -851,6 +904,7 @@ def _render_candidates_considered_terminal(
     table.add_column("Model", style=BRAND_CYAN, no_wrap=True)
     table.add_column("Monthly", justify="right")
     table.add_column("Vs. baseline", justify="right", style="dim")
+    table.add_column("Quality tier", justify="left", style="dim")
     table.add_column("Status", justify="left")
 
     for proj in projs:
@@ -891,7 +945,7 @@ def _render_candidates_considered_terminal(
         else:
             status_cell = Text(label, style="dim")
 
-        table.add_row(proj.model, money, saving, status_cell)
+        table.add_row(proj.model, money, saving, proj.tier_label, status_cell)
 
     rprint(Padding(table, (1, 0, 0, 2)))
     # One-line caption beneath the block — explains WHY one was picked as the
@@ -902,6 +956,17 @@ def _render_candidates_considered_terminal(
             (0, 0, 0, 2),
         )
     )
+    # Default-pool cap caption — an additional honest line telling the user the
+    # FULL built-in pool was considered, not just the rows shown.  None (no-op)
+    # on the explicit --candidates path, where every passed candidate is shown.
+    cap_caption = _candidate_cap_caption(result)
+    if cap_caption is not None:
+        rprint(
+            Padding(
+                Text(cap_caption, style="dim"),
+                (0, 0, 0, 2),
+            )
+        )
 
 
 def _split_accounting(result: AnalysisResult, split: SplitRouting) -> tuple[int, list[str]]:
@@ -4900,9 +4965,9 @@ def _candidates_considered_md_lines(
 
     Empty list when the user passed <=1 candidate (no block rendered, MD stays
     byte-identical).  Otherwise returns a level-2 heading + a small table:
-    Model | Monthly cost | Saving% | Status — one row per candidate.  Sits
-    below the cost-analysis section and above the "## Details" / freshness
-    block on every Markdown surface (split + wholesale).
+    Model | Monthly cost | Vs. baseline | Quality tier | Status — one row per
+    candidate.  Sits below the cost-analysis section and above the
+    "## Details" / freshness block on every Markdown surface (split + wholesale).
     """
     projs = result.candidate_projections
     if len(projs) <= 1:
@@ -4910,8 +4975,8 @@ def _candidates_considered_md_lines(
     lines: list[str] = [
         "## Candidates considered",
         "",
-        "| Model | Monthly cost | Vs. baseline | Status |",
-        "|-------|-------------:|-------------:|--------|",
+        "| Model | Monthly cost | Vs. baseline | Quality tier | Status |",
+        "|-------|-------------:|-------------:|--------------|--------|",
     ]
     for proj in projs:
         if proj.status == "unpriced":
@@ -4925,8 +4990,13 @@ def _candidates_considered_md_lines(
         pct_val = proj.saving_pct if proj.saving_pct is not None else proj.observed_saving_pct
         saving = "—" if pct_val is None else _fmt_candidate_saving(pct_val)
         label = _CANDIDATE_STATUS_LABEL[proj.status]
-        lines.append(f"| `{proj.model}` | {money} | {saving} | {label} |")
+        lines.append(
+            f"| `{proj.model}` | {money} | {saving} | {proj.tier_label} | {label} |"
+        )
     lines += ["", f"_{_candidate_caption(has_judge_section)}_", ""]
+    cap_caption = _candidate_cap_caption(result)
+    if cap_caption is not None:
+        lines += [f"_{cap_caption}_", ""]
     return lines
 
 
@@ -4977,6 +5047,7 @@ def _candidates_considered_html(
             f'<td class="c-model"><span class="model-name">{esc(proj.model)}</span></td>'
             f'<td class="num">{money}</td>'
             f'<td class="num">{saving}</td>'
+            f'<td class="c-tier">{esc(proj.tier_label)}</td>'
             f'<td class="c-status">{status_html}</td>'
             "</tr>"
         )
@@ -4986,6 +5057,7 @@ def _candidates_considered_html(
         "<th>Model</th>"
         '<th class="num">Monthly cost</th>'
         '<th class="num">Vs. baseline</th>'
+        '<th class="c-tier">Quality tier</th>'
         '<th class="c-status">Status</th>'
         "</tr></thead><tbody>"
         + "".join(rows)
@@ -4993,7 +5065,14 @@ def _candidates_considered_html(
         '<p class="caption candidates-caption">'
         + esc(_candidate_caption(has_judge_section))
         + "</p>"
-        "</div>"
+        + (
+            '<p class="caption candidates-caption">'
+            + esc(cap_caption)
+            + "</p>"
+            if (cap_caption := _candidate_cap_caption(result)) is not None
+            else ""
+        )
+        + "</div>"
     )
 
 
@@ -5850,6 +5929,7 @@ _CANDIDATES_TABLE_V1_CSS = """
 }
 .tbl-candidates td.c-model .model-name{color:var(--cyan)}
 .tbl-candidates td.c-status,.tbl-candidates th.c-status{white-space:nowrap}
+.tbl-candidates td.c-tier,.tbl-candidates th.c-tier{white-space:nowrap;opacity:0.8}
 /* Status badge — same pill shape/typography as the routing-plan badge, with a
    per-status colour so the recommended candidate reads as the headline pick and
    a more-expensive one carries a quiet amber caution. */
@@ -7096,6 +7176,7 @@ code{
   font-size:0.92rem;color:var(--cyan);
 }
 .tbl-candidates td.c-status,.tbl-candidates th.c-status{white-space:nowrap}
+.tbl-candidates td.c-tier,.tbl-candidates th.c-tier{white-space:nowrap;color:var(--ink-mute)}
 .tbl-candidates .badge{
   margin-left:0;color:var(--ink-mute);
   border:1px solid var(--hair);background:var(--panel);

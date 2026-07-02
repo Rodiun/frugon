@@ -40,7 +40,7 @@ from frugon.report import (
 # the invariant first sentence's exact whitespace.
 _JUDGE_CLAUSE = "scored independently in the quality measurement below"
 _NO_JUDGE_CLAUSE = "Run --measure --judge to score each candidate"
-_BASE_SENTENCE = "the cheapest split is the headline recommendation"
+_BASE_SENTENCE = "the biggest saving is the headline recommendation"
 
 
 # ---------------------------------------------------------------------------

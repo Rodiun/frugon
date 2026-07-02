@@ -5,6 +5,7 @@ A much bigger recommendation roster, better quality coverage for reasoning model
 ## Added
 
 - **A 23-model recommendation roster across 11 vendors.** The default candidate pool grew from 10 to 23 current top models spanning OpenAI, Anthropic, Google, DeepSeek, Moonshot, xAI, Mistral, Z.ai, MiniMax, Alibaba, and Meta (open-source Llama) — every one both priced and quality-rated — so recommendations on your real logs draw from a much wider, more current field. The two open-source Llama 4 checkpoints, which have no single first-party price, are priced via Groq as a labeled reference host rather than an invented number.
+- **See what else was considered.** A default (no `--candidates`) run now shows a "Candidates considered" block alongside the headline recommendation — the recommended model plus the next four cheapest candidates that also beat your current spend, each one with its own projected monthly cost, saving%, and quality tier. Previously this transparency only appeared when you passed `--candidates` yourself; now it's there by default, on the demo too, with a line telling you how many models were in the full pool and how to compare specific ones with `--candidates`. When two or more candidates save the same amount to the decimal place shown, the recommendation goes to whichever has the higher quality tier — the Quality tier column makes that call visible, not just asserted.
 
 ## Improved
 
@@ -13,6 +14,7 @@ A much bigger recommendation roster, better quality coverage for reasoning model
 - **The demo's recommendation moved.** With the un-pinned roster and the refreshed data below, the demo's headline recommendation now routes easy calls to `deepseek-v4-flash` (it previously routed to a fixed illustrative pick) — an honest side effect of no longer special-casing the demo.
 - **Fresh pricing and quality data.** The bundled pricing table and LMArena quality tiers are re-synced to their public sources as of this release, the same weekly process `frugon update` runs for you.
 - **Honest disclosure copy.** The post-recommendation note no longer claims a "fixed demo candidate set" — it says plainly that `--demo` runs on bundled sample data, full stop.
+- **`--measure`/`--judge` now recognise every vendor in the 23-model roster.** DeepSeek, xAI (Grok), Moonshot (Kimi), Z.ai (GLM), MiniMax, and Alibaba (Qwen) models — plus the two reference-host Llama 4 checkpoints — now get the correct provider-key prompt and route correctly to their provider, instead of a generic "bad request" the first time you tried to measure one of them.
 
 ## Install / upgrade
 

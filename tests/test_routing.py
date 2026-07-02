@@ -19,7 +19,6 @@ from frugon.pricing import ModelPrice
 from frugon.routing import (
     EASY_THRESHOLD,
     SplitRouting,
-    build_split,
     compute_split,
     difficulty_score,
     is_easy,
@@ -448,47 +447,3 @@ class TestComputeSplitMonthlyProjection:
         assert split.monthly_blended is None
 
 
-# ---------------------------------------------------------------------------
-# build_split — selection + computation convenience
-# ---------------------------------------------------------------------------
-
-
-class TestBuildSplit:
-    """build_split wires selection and computation; returns None when impossible."""
-
-    def test_returns_none_for_empty_calls(self) -> None:
-        assert build_split(baseline_model="gpt-4-turbo", baseline_call_costs=[], pool=["gpt-4o-mini"]) is None
-
-    def test_returns_none_when_no_cheaper_candidate(self) -> None:
-        calls = [_call_cost(_record(40, 2), get_price("gpt-4o-mini"))]
-        assert build_split(
-            baseline_model="gpt-4o-mini",
-            baseline_call_costs=calls,
-            pool=["gpt-4o"],
-        ) is None
-
-    def test_builds_split_for_premium_baseline(self) -> None:
-        premium_price = get_price("gpt-4-turbo")
-        calls = [
-            _call_cost(_record(40, 2, n_messages=2), premium_price),  # easy
-            _call_cost(_record(2200, 1100, n_messages=3), premium_price),  # hard
-        ]
-        split = build_split(
-            baseline_model="gpt-4-turbo",
-            baseline_call_costs=calls,
-            pool=["gpt-4o", "gpt-4o-mini", "claude-3-haiku-20240307"],
-        )
-        assert split is not None
-        assert split.candidate_model == "gpt-4o-mini"
-        assert split.routed_count == 1
-        assert split.kept_count == 1
-        assert split.blended_cost < split.baseline_cost
-
-
-def get_price(model: str) -> ModelPrice:
-    """Resolve a real bundled price (helper for build_split tests)."""
-    from frugon.pricing import get_model_price
-
-    price = get_model_price(model)
-    assert price is not None, f"expected a bundled price for {model}"
-    return price

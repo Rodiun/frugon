@@ -277,36 +277,3 @@ def compute_split(
         monthly_baseline=_project_monthly(baseline_cost, window_days, observed_span_days),
         monthly_blended=_project_monthly(blended_cost, window_days, observed_span_days),
     )
-
-
-def build_split(
-    *,
-    baseline_model: str,
-    baseline_call_costs: list[CallCost],
-    pool: list[str],
-    threshold: Decimal = EASY_THRESHOLD,
-    window_days: int | None = None,
-    observed_span_days: float | None = None,
-) -> SplitRouting | None:
-    """Select an easy-call target from *pool* and compute the split, or None.
-
-    Returns None when no rated, priced, strictly-cheaper candidate exists, or
-    when there are no baseline calls to route.
-    """
-    if not baseline_call_costs:
-        return None
-    candidate_model = select_easy_target(baseline_model, pool)
-    if candidate_model is None:
-        return None
-    candidate_price = get_model_price(candidate_model)
-    if candidate_price is None:  # pragma: no cover — select_easy_target already priced it
-        return None
-    return compute_split(
-        baseline_model=baseline_model,
-        candidate_model=candidate_model,
-        baseline_call_costs=baseline_call_costs,
-        candidate_price=candidate_price,
-        threshold=threshold,
-        window_days=window_days,
-        observed_span_days=observed_span_days,
-    )

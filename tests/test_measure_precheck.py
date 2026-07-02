@@ -390,21 +390,33 @@ def test_explicit_candidates_are_honoured_unchanged(
 def test_precheck_panel_names_recommended_candidate(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
-    """The missing-key panel references the recommended candidate (proof of GAP 1).
+    """The missing-key panel references the PREDICTED candidate (proof of GAP 1).
 
-    The panel must name the recommended candidate — not just the missing env var —
-    so the user can see which switch frugon proposes.  The candidate is derived
-    from the default pool so this tracks the curated roster.
+    The panel must name a candidate — not just the missing env var — so the user
+    can see which switch frugon is likely to propose. Since the 2026-07-02
+    quality-aware tie-break fix, the cost analysis's REAL split recommendation
+    (full-dataset New-spend + tie-break) can differ from this cheap pre-check's
+    PREDICTION (select_easy_target's blended-per-token-price heuristic, the only
+    basis available before the expensive per-call cost pass) — that divergence
+    is exactly why the prediction is advisory, never blocking, in cli.py (see
+    ``predicted_default_candidate``). This test asserts against the SAME cheap
+    prediction the panel actually displays, not the expensive real answer.
     """
     # Arrange — extra importable, key absent → the friendly panel fires.
     monkeypatch.setattr(measure, "_import_litellm", lambda: object())
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     log = _write_log(tmp_path / "log.jsonl", [_heavy_row("gpt-4-turbo") for _ in range(6)])
-    # Derive the recommended candidate from the default pool so the assertion
-    # tracks the curated roster instead of a brittle literal.
-    _split = cost.analyze_logs(log).split
-    assert _split is not None, "expected a split recommendation for this log"
-    recommended = _split.candidate_model
+    # Derive the PREDICTED candidate via the same cheap heuristic cli.py's
+    # precheck uses, so the assertion tracks the curated roster instead of a
+    # brittle literal — and stays honest about what the panel can actually know
+    # before the expensive analysis pass.
+    from frugon.cost import _ROUTING_CANDIDATES, scan_models
+    from frugon.routing import select_easy_target
+
+    _distinct, _dominant = scan_models(log)
+    assert _dominant is not None
+    predicted = select_easy_target(_dominant, _ROUTING_CANDIDATES)
+    assert predicted is not None, "expected a predicted candidate for this log"
 
     # Act
     invoke = runner.invoke(
@@ -415,7 +427,89 @@ def test_precheck_panel_names_recommended_candidate(
     assert invoke.exit_code == 1, invoke.output
     out = _clean(invoke.output)
     assert "Traceback" not in out, out
-    assert recommended in out, f"recommended candidate not named in panel:\n{out}"
+    assert predicted in out, f"predicted candidate not named in panel:\n{out}"
+
+
+class TestAdvisoryPredictionNeverBlocksAWrongGuess:
+    """The cheap default-pool prediction (select_easy_target) is ADVISORY.
+
+    When it diverges from the real analysis's split recommendation
+    (frugon.cost._select_cheapest_eligible, full-dataset New-spend +
+    quality tie-break — a basis the cheap scan_models() pass cannot compute),
+    a missing key for the WRONG (predicted-but-not-actually-needed) model must
+    never block a run that does not actually need that key. run_measure's own
+    authoritative _check_provider_keys(all_models) re-verifies against the REAL
+    model list before any provider call and is the true gate.
+    """
+
+    def test_wrong_prediction_does_not_block_when_real_recommendation_needs_no_new_key(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        # Arrange — the classic divergent fixture: predicted candidate needs
+        # DEEPSEEK_API_KEY, but the REAL split recommendation for this exact
+        # log is gpt-4.1-nano (needs only OPENAI_API_KEY, already set for the
+        # gpt-4-turbo baseline).
+        from frugon.cost import _ROUTING_CANDIDATES, scan_models
+        from frugon.routing import select_easy_target
+
+        monkeypatch.setattr(measure, "_import_litellm", lambda: object())
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        log = _write_log(
+            tmp_path / "log.jsonl", [_heavy_row("gpt-4-turbo") for _ in range(6)]
+        )
+
+        _distinct, _dominant = scan_models(log)
+        assert _dominant is not None
+        predicted = select_easy_target(_dominant, _ROUTING_CANDIDATES)
+        assert predicted == "deepseek-v4-flash", (
+            f"fixture precondition drifted: predicted={predicted!r}"
+        )
+        real_split = cost.analyze_logs(log).split
+        assert real_split is not None
+        assert real_split.candidate_model != predicted, (
+            "fixture precondition: the cheap prediction must genuinely diverge "
+            "from the real recommendation for this test to prove anything"
+        )
+        assert measure._required_key_for_model(real_split.candidate_model) == (
+            "OPENAI_API_KEY"
+        )
+
+        captured = _capture_run_measure(monkeypatch)
+
+        # Act
+        invoke = runner.invoke(
+            app, ["analyze", str(log), "--measure"], env=_WIDE_ENV, catch_exceptions=True
+        )
+
+        # Assert — the wrong prediction (needing DEEPSEEK_API_KEY) never
+        # blocked the run; the REAL recommendation only needs the
+        # already-present OPENAI_API_KEY, so the run completes successfully.
+        assert invoke.exit_code == 0, (
+            f"a wrong cheap prediction incorrectly blocked the run:\n{invoke.output}"
+        )
+        assert captured, "run_measure was never called"
+        assert captured[0]["candidates"] == [real_split.candidate_model]
+
+    def test_advisory_heads_up_line_appears_for_a_genuinely_missing_predicted_key(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        """The non-fatal heads-up still surfaces so the fast-fail nicety survives."""
+        monkeypatch.setattr(measure, "_import_litellm", lambda: object())
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        log = _write_log(
+            tmp_path / "log.jsonl", [_heavy_row("gpt-4-turbo") for _ in range(6)]
+        )
+        _capture_run_measure(monkeypatch)
+
+        invoke = runner.invoke(
+            app, ["analyze", str(log), "--measure"], env=_WIDE_ENV, catch_exceptions=True
+        )
+
+        out = _clean(invoke.output)
+        assert "Heads up" in out
+        assert "DEEPSEEK_API_KEY" in out
 
 
 # ---------------------------------------------------------------------------
@@ -470,3 +564,207 @@ def test_far_env_var_not_suggested(monkeypatch):
     with pytest.raises(_m.MissingProviderKeyError) as ei:
         _m._check_provider_keys(["gpt-4-turbo"])
     assert "OPENAI_API_KEY" not in ei.value.suggestions
+
+
+# ---------------------------------------------------------------------------
+# New-vendor roster gap (FRG-OSS-034 follow-up, 2026-07-02) — the 23-model
+# default pool grew to 11 vendors but _PROVIDER_KEY_MAP / the LiteLLM routing
+# table were never extended to match.  Every mapping added to close that gap
+# gets its own precheck test here: (1) the correct env var is required, (2) the
+# precheck actually FIRES MissingProviderKeyError when that var is absent, and
+# (3) the bare roster name routes to a LiteLLM-resolvable provider-prefixed
+# form (see _LITELLM_ROUTE_PREFIX in measure.py — verified against this repo's
+# own .venv LiteLLM install, not guessed).
+# ---------------------------------------------------------------------------
+
+_NEW_VENDOR_KEY_CASES = [
+    ("deepseek-v3.2", "DEEPSEEK_API_KEY"),
+    ("deepseek-v4-flash", "DEEPSEEK_API_KEY"),
+    ("deepseek-v4-pro", "DEEPSEEK_API_KEY"),
+    ("grok-4", "XAI_API_KEY"),
+    ("grok-3-mini", "XAI_API_KEY"),
+    ("kimi-k2.6", "MOONSHOT_API_KEY"),
+    ("glm-4.6", "ZAI_API_KEY"),
+    ("glm-4.5-air", "ZAI_API_KEY"),
+    ("minimax-m3", "MINIMAX_API_KEY"),
+    ("qwen-max", "DASHSCOPE_API_KEY"),
+    ("llama-4-maverick-17b-128e-instruct", "GROQ_API_KEY"),
+    ("llama-4-scout-17b-16e-instruct", "GROQ_API_KEY"),
+]
+
+
+class TestNewVendorKeyMap:
+    @pytest.mark.parametrize(("model", "expected_var"), _NEW_VENDOR_KEY_CASES)
+    def test_required_key_for_model_resolves(
+        self, model: str, expected_var: str
+    ) -> None:
+        assert _m._required_key_for_model(model) == expected_var
+
+    @pytest.mark.parametrize(("model", "expected_var"), _NEW_VENDOR_KEY_CASES)
+    def test_precheck_fires_missing_key_when_env_var_absent(
+        self, model: str, expected_var: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange — extra present, the required var absent from the environment.
+        monkeypatch.setattr(_m, "_import_litellm", lambda: object())
+        monkeypatch.delenv(expected_var, raising=False)
+
+        # Act / Assert — the precheck must name the SAME var the map declares,
+        # BEFORE any provider call is attempted.
+        with pytest.raises(MissingProviderKeyError) as excinfo:
+            verify_measure_prerequisites([model])
+        assert expected_var in excinfo.value.missing_vars, (
+            f"{model} did not require {expected_var}: "
+            f"got {excinfo.value.missing_vars!r}"
+        )
+
+    @pytest.mark.parametrize(("model", "expected_var"), _NEW_VENDOR_KEY_CASES)
+    def test_precheck_passes_when_env_var_present(
+        self, model: str, expected_var: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        monkeypatch.setattr(_m, "_import_litellm", lambda: object())
+        monkeypatch.setenv(expected_var, "dummy-not-real")
+
+        # Act / Assert — no MissingProviderKeyError once the var is present.
+        # (verify_measure_prerequisites also runs _check_known_models, which
+        # this bundled roster's own pricing.json entries satisfy.)
+        verify_measure_prerequisites([model])
+
+    def test_no_roster_model_is_missing_a_key_mapping(self) -> None:
+        """Regression pin for the exact gap this suite closes: EVERY model in
+        the live 23-model default pool must resolve a required env var."""
+        from frugon.cost import _ROUTING_CANDIDATES
+
+        missing = [
+            m for m in _ROUTING_CANDIDATES if _m._required_key_for_model(m) is None
+        ]
+        assert missing == [], (
+            f"_ROUTING_CANDIDATES entries with no _PROVIDER_KEY_MAP mapping: "
+            f"{missing}"
+        )
+
+
+class TestNewVendorLiteLLMRouting:
+    """_route_for_measure prepends the provider prefix the new roster needs.
+
+    Confirmed against this repo's OWN .venv LiteLLM install
+    (``litellm.get_llm_provider``) that: (a) the bare roster name is NOT
+    routable on its own, and (b) the routed (prefixed) form IS routable — so
+    these tests pin frugon's OWN mapping logic, not LiteLLM's internals.
+    """
+
+    @pytest.mark.parametrize(
+        ("bare", "expected_prefix"),
+        [
+            ("deepseek-v3.2", "deepseek/"),
+            ("deepseek-v4-flash", "deepseek/"),
+            ("grok-4", "xai/"),
+            ("grok-3-mini", "xai/"),
+            ("kimi-k2.6", "moonshot/"),
+            ("glm-4.6", "zai/"),
+            ("glm-4.5-air", "zai/"),
+            ("minimax-m3", "minimax/"),
+            ("qwen-max", "dashscope/"),
+        ],
+    )
+    def test_route_for_measure_prepends_expected_prefix(
+        self, bare: str, expected_prefix: str
+    ) -> None:
+        assert measure._route_for_measure(bare) == expected_prefix + bare
+
+    @pytest.mark.parametrize(
+        "bare",
+        [
+            "llama-4-maverick-17b-128e-instruct",
+            "llama-4-scout-17b-16e-instruct",
+        ],
+    )
+    def test_route_for_measure_llama4_uses_groq_meta_llama_form(
+        self, bare: str
+    ) -> None:
+        assert measure._route_for_measure(bare) == f"groq/meta-llama/{bare}"
+
+    def test_route_for_measure_leaves_already_routable_names_unchanged(
+        self,
+    ) -> None:
+        # Default-namespace models (OpenAI/Anthropic) and names the user
+        # already prefixed themselves must pass through unchanged.
+        for model in ("gpt-5.5", "claude-opus-4-8", "openrouter/openai/gpt-4o"):
+            assert measure._route_for_measure(model) == model
+
+    def test_stored_output_model_name_stays_bare_after_routing(self) -> None:
+        """SampledOutput.model must be the ORIGINAL bare name, never the routed
+        (provider-prefixed) form — reports and --candidates matching depend on
+        the bare name."""
+        from frugon.measure import SampledOutput, _call_model
+
+        class _FakeMessage:
+            content = "ok"
+
+        class _FakeChoice:
+            message = _FakeMessage()
+
+        class _FakeResponse:
+            choices = [_FakeChoice()]
+            usage = None
+
+        class _FakeLiteLLM:
+            last_model_called: str | None = None
+
+            def completion(self, model: str, messages: list[dict[str, str]]) -> _FakeResponse:
+                self.last_model_called = model
+                return _FakeResponse()
+
+        fake = _FakeLiteLLM()
+        out: SampledOutput = _call_model(fake, "deepseek-v3.2", [{"role": "user", "content": "hi"}])
+        assert out.model == "deepseek-v3.2"  # bare, not "deepseek/deepseek-v3.2"
+        assert fake.last_model_called == "deepseek/deepseek-v3.2"  # but routed on the wire
+
+    @pytest.mark.parametrize(
+        ("bare", "expected_prefix"),
+        [
+            ("deepseek-v3.2", "deepseek/"),
+            ("grok-4", "xai/"),
+        ],
+    )
+    def test_get_llm_provider_resolves_the_routed_form(
+        self, bare: str, expected_prefix: str
+    ) -> None:
+        """Live confirmation (not a guess) against the bundled LiteLLM install:
+        the ROUTED form resolves a provider; the bare form does not."""
+        litellm = pytest.importorskip("litellm")
+        routed = measure._route_for_measure(bare)
+        assert routed == expected_prefix + bare
+        # Routed form resolves without raising.
+        litellm.get_llm_provider(routed)
+        # Bare form raises BadRequestError — proving the prefix is actually
+        # necessary, not merely harmless decoration.
+        with pytest.raises(litellm.exceptions.BadRequestError):
+            litellm.get_llm_provider(bare)
+
+
+class TestRoutePrefixNoOverlap:
+    """P3-1: _LITELLM_ROUTE_PREFIX mixes vendor PREFIXES ("deepseek-") with
+    FULL model names ("llama-4-scout-17b-16e-instruct"), and
+    ``_route_for_measure`` matches via ``startswith`` — so if a shorter key
+    ever became a proper prefix of a longer one, the match for the longer
+    name would be nondeterministic (whichever key ``dict`` iteration reaches
+    first), silently routing it through the WRONG vendor's prefix. This test
+    is the standing guard: it must stay green as new entries are added.
+    """
+
+    def test_no_key_is_a_proper_prefix_of_another_key(self) -> None:
+        from frugon.measure import _LITELLM_ROUTE_PREFIX
+
+        keys = list(_LITELLM_ROUTE_PREFIX)
+        offenders = [
+            (short, long_)
+            for short in keys
+            for long_ in keys
+            if short != long_ and long_.startswith(short)
+        ]
+        assert offenders == [], (
+            f"_LITELLM_ROUTE_PREFIX keys overlap (a proper prefix relationship "
+            f"exists): {offenders} — _route_for_measure's startswith() match "
+            "would resolve these nondeterministically"
+        )

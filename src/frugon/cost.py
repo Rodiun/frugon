@@ -21,7 +21,7 @@ import functools
 import json
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -87,14 +87,19 @@ class CallCost:
 
 @dataclass
 class CandidateProjection:
-    """One candidate's projection — shown when --candidates lists more than one.
+    """One candidate's projection — shown in the "Candidates considered" block.
 
     The cost projection's headline picks the SINGLE cheapest candidate that beats
-    the baseline.  When the user passes multiple candidates, the others were
-    considered too — they just lost the cheapest-wins tiebreak — so the cost
-    analysis surfaces every candidate (recommended, considered, more-expensive,
-    or unpriced) honestly, with each one's projected monthly cost beside its
-    status.  This is rendering metadata: the underlying headline projection math
+    the baseline. When the user passes multiple ``--candidates``, every one of
+    them is surfaced here (recommended, considered, more-expensive, or unpriced),
+    with each one's projected monthly cost beside its status — the others were
+    considered too, they just lost the cheapest-wins tiebreak. On the DEFAULT
+    pool (no explicit ``--candidates``), the same block fires whenever a split
+    recommendation exists and the pool has more than one model: real users — and
+    the un-pinned demo — should SEE what was considered, not just the winner, so
+    the list is capped to the recommended candidate plus the next-4-cheapest
+    candidates that also beat the baseline (5 rows max), never the full built-in
+    roster. This is rendering metadata: the underlying headline projection math
     is identical to the single-cheapest-candidate path.
 
     *monthly_cost*, *monthly_saving*, *saving_pct* are None when the candidate
@@ -117,6 +122,14 @@ class CandidateProjection:
     *monthly_cost* and *saving_pct* come from per-candidate split projections
     (route easy baseline calls to this candidate, keep hard calls on baseline)
     — directly comparable to the headline New-spend / saving%.
+
+    *tier_label* is the model's quality tier NAME ("Elite", "Strong",
+    "Capable", "Efficient") or ``"Unrated"`` when the model has no entry in the
+    quality table — printed as its own column so the display-precision quality
+    tie-break (:func:`_select_cheapest_eligible`) is self-evident from the
+    table alone: a user can see that the recommended row's tier is at least as
+    good as every row it ties with on saving%, without having to trust the
+    caption's word for it.
     """
 
     model: str
@@ -127,6 +140,7 @@ class CandidateProjection:
     observed_cost: Decimal | None = None
     observed_saving: Decimal | None = None
     observed_saving_pct: Decimal | None = None
+    tier_label: str = "Unrated"
 
 
 @dataclass
@@ -857,6 +871,95 @@ def _full_dataset_split_newspend(
     return current - reduction
 
 
+_DISPLAY_PCT_QUANTUM = Decimal("0.1")
+
+
+def _display_pct(pct: Decimal) -> Decimal:
+    """Quantize *pct* to the ONE decimal place every surface actually prints.
+
+    ``_fmt_candidate_saving`` (report.py) and the headline panel both render
+    saving% at 1dp.  Selection must compare candidates on this SAME rounded
+    value — not the raw, effectively-never-exactly-equal Decimal — or a
+    caption that reads "the cheapest split is the headline recommendation"
+    would be provably false the moment two candidates print the identical
+    percent but differ in the 5th decimal place (the exact defect this
+    function exists to close).
+    """
+    return pct.quantize(_DISPLAY_PCT_QUANTUM, rounding=ROUND_HALF_UP)
+
+
+def _select_cheapest_eligible(
+    candidates: Iterable[str],
+    *,
+    cand_split_newspend: dict[str, Decimal],
+    baseline_newspend: Decimal,
+    rated_only: bool,
+) -> str | None:
+    """Pick the winning candidate on the FULL-DATASET split New-spend basis.
+
+    THE SELECTION RULE (binding across the explicit-``--candidates`` path and
+    the default-pool path — one function, one rule, so headline and block can
+    never again name different candidates or justify a false caption):
+
+      1. Eligibility: the candidate must have an entry in *cand_split_newspend*
+         (i.e. it was priced) and its full-dataset New-spend must strictly beat
+         *baseline_newspend* — the SAME quantity the "Candidates considered"
+         block ranks and displays, never a different per-token proxy.  When
+         *rated_only* is True, unrated candidates are excluded entirely (the
+         default-pool path — every pool entry is rated, see
+         ``test_candidate_pool.py``, but the guard is defensive).  When False,
+         both rated and unrated eligible candidates are ranked together (the
+         explicit ``--candidates`` fallback semantics: prefer rated, but the
+         caller applies that preference by calling this twice — once
+         rated-only, once unrated-only — and prefers the rated result; see the
+         explicit-path call site).
+      2. Primary rank: ascending full-dataset New-spend (cheapest wins) —
+         except candidates whose saving% renders IDENTICALLY at the 1dp the
+         report actually prints (:func:`_display_pct`) are a DISPLAY TIE, not a
+         real difference a user can see on the page.
+      3. Quality tie-break (PD-ratified 2026-07-02): among candidates tied at
+         display precision, the HIGHER quality tier wins — i.e. the LOWER
+         ``get_model_tier`` integer (0 = Elite is best).  This makes the
+         recommendation's caption provable from the printed values alone: two
+         rows can print the same percent, but the winner is never the
+         lower-quality one.
+      4. Final tie-break: lexicographic model name, for full determinism when
+         percent AND tier both tie.
+
+    Returns None when no candidate is eligible.
+    """
+    best_model: str | None = None
+    best_key: tuple[Decimal, int, str] | None = None
+    for cand in candidates:
+        if cand not in cand_split_newspend:
+            continue
+        ns = cand_split_newspend[cand]
+        if ns >= baseline_newspend:
+            continue
+        is_unrated = _is_unrated(cand)
+        if rated_only and is_unrated:
+            continue
+        tier = _get_model_tier(cand)
+        # Display-tie rank: cheaper (more negative) percent sorts first; the
+        # 1dp-quantized percent is the ACTUAL comparison key (step 2 above), so
+        # two candidates whose raw New-spend differs but whose printed percent
+        # is identical share the same rank position and fall through to tier.
+        pct = (
+            (baseline_newspend - ns) / baseline_newspend * Decimal("100")
+            if baseline_newspend != Decimal("0")
+            else Decimal("0")
+        )
+        rank_pct = -_display_pct(pct)  # negate: ascending sort == best-first
+        # Unrated candidates never win a display-tie against a rated one; give
+        # them a tier sentinel strictly worse than any real tier.
+        tier_key = tier if not is_unrated else 10_000
+        key = (rank_pct, tier_key, cand)
+        if best_key is None or key < best_key:
+            best_key = key
+            best_model = cand
+    return best_model
+
+
 # ---------------------------------------------------------------------------
 # Core aggregation (accepts pre-parsed records)
 # ---------------------------------------------------------------------------
@@ -1042,68 +1145,55 @@ def analyze_records(
                 monthly_factor=monthly_factor,
             )
 
-        # The headline routing target is the candidate with the cheapest
-        # full-dataset split New-spend that strictly beats the baseline on that
-        # same basis (deterministic tie-break by model name) — BUT only RATED
-        # candidates are eligible for the headline.  An unrated candidate has no
-        # known quality tier, so routing the dominant model's easy calls onto it
-        # would silently trade unknown quality for price; such a candidate is
+        # The headline routing target is the candidate that wins
+        # :func:`_select_cheapest_eligible` on the full-dataset split New-spend
+        # basis — cheapest, with a display-precision quality tie-break (see that
+        # function's docstring for the full rule) — BUT only RATED candidates
+        # are eligible for the headline.  An unrated candidate has no known
+        # quality tier, so routing the dominant model's easy calls onto it would
+        # silently trade unknown quality for price; such a candidate is
         # surfaced as "considered" in the block, never silently recommended.
-        #
-        # Eligibility = the candidate has a known quality tier
-        # (``get_model_tier(model) != UNRATED_TIER``).  We pick the cheapest
-        # ELIGIBLE candidate that beats the baseline.  Only when NO rated
-        # candidate beats the baseline do we fall back to the cheapest unrated
-        # one that beats it (the user explicitly asked for these candidates and
-        # there is no rated alternative) — carried with the unrated caveat so the
-        # quality gap is disclosed.  The candidate's split IS the headline split
-        # and its full-swap total IS the Upper-bound projection, so the routing
-        # target, the panel figures, the block's "recommended"/"considered" tag,
-        # and the Upper bound all stay internally consistent.
+        # Only when NO rated candidate beats the baseline do we fall back to the
+        # cheapest unrated one that beats it (the user explicitly asked for
+        # these candidates and there is no rated alternative) — carried with the
+        # unrated caveat so the quality gap is disclosed.  The candidate's split
+        # IS the headline split and its full-swap total IS the Upper-bound
+        # projection, so the routing target, the panel figures, the block's
+        # "recommended"/"considered" tag, and the Upper bound all stay
+        # internally consistent.
         baseline_newspend = (
             total_cost * monthly_factor if monthly_factor is not None else total_cost
         )
 
-        def _cheaper(ns: Decimal, cand: str, best_ns: Decimal | None, best: str | None) -> bool:
-            return (
-                best_ns is None
-                or ns < best_ns
-                or (ns == best_ns and cand < (best or ""))
-            )
-
-        best_rated_model: str | None = None
-        best_rated_newspend: Decimal | None = None
-        best_unrated_model: str | None = None
-        best_unrated_newspend: Decimal | None = None
         # Unrated candidates that beat the baseline on the split but are held out
         # of the recommended route purely for being unrated.  Drives the
         # "excluded because unrated — measure to unlock" caveat (Change 1b).
         # User command-line order, de-duplicated.
         _seen_excluded: set[str] = set()
         for cand in candidates:
-            if cand not in cand_split_newspend:
-                continue
-            ns = cand_split_newspend[cand]
-            if ns >= baseline_newspend:
-                continue
-            if _is_unrated(cand):
-                if cand not in _seen_excluded:
+            if cand in cand_split_newspend and _is_unrated(cand):
+                ns = cand_split_newspend[cand]
+                if ns < baseline_newspend and cand not in _seen_excluded:
                     unrated_beats_baseline.append(cand)
                     _seen_excluded.add(cand)
-                if _cheaper(ns, cand, best_unrated_newspend, best_unrated_model):
-                    best_unrated_model = cand
-                    best_unrated_newspend = ns
-            else:
-                if _cheaper(ns, cand, best_rated_newspend, best_rated_model):
-                    best_rated_model = cand
-                    best_rated_newspend = ns
 
-        # Prefer the cheapest rated candidate; fall back to the cheapest unrated
-        # one only when no rated candidate beats the baseline.
-        if best_rated_model is not None:
-            best_model: str | None = best_rated_model
-        else:
-            best_model = best_unrated_model
+        best_model = _select_cheapest_eligible(
+            candidates,
+            cand_split_newspend=cand_split_newspend,
+            baseline_newspend=baseline_newspend,
+            rated_only=True,
+        )
+        if best_model is None:
+            # No rated candidate beats the baseline — fall back to the cheapest
+            # unrated one (same selection rule, restricted to the unrated set
+            # via a second pass rather than a rated_only=False call, so a rated
+            # candidate can never lose a display-tie to an unrated one here).
+            best_model = _select_cheapest_eligible(
+                (c for c in candidates if _is_unrated(c)),
+                cand_split_newspend=cand_split_newspend,
+                baseline_newspend=baseline_newspend,
+                rated_only=False,
+            )
         candidate_model = best_model
         # ``projected_cost`` carries the aggressive full-SWAP total of the chosen
         # candidate, used solely for the "Upper bound" line so it stays internally
@@ -1116,6 +1206,91 @@ def analyze_records(
         )
     else:
         candidate_model, projected_cost = _best_candidate(dominant_model, priced)
+
+        # Default-pool candidate splits — the SAME full-dataset split New-spend
+        # basis the explicit-``--candidates`` path computes above, run over the
+        # built-in ``_ROUTING_CANDIDATES`` roster instead of a user-supplied list.
+        # Populates ``cand_splits``/``cand_split_newspend`` so the split-routing
+        # selection below (when ``split_routing`` is True) and the "Candidates
+        # considered" block both rank on the IDENTICAL basis — one function, one
+        # rule, so the headline split target and the block's recommended row
+        # can never again name different candidates (see
+        # :func:`_select_cheapest_eligible`).  When ``split_routing`` is False
+        # (``--wholesale``), this dict is still populated but unused: the
+        # wholesale headline keeps the tier-capped ``_best_candidate`` pick
+        # above, because a wholesale swap moves EVERY call and so needs the
+        # tighter tier-drop cap that only applies to a full swap.
+        from frugon.pricing import get_model_price as _gmp_default
+        from frugon.routing import compute_split as _compute_split_default
+
+        baseline_call_costs_default = [
+            cc for cc in priced if cc.record.model == dominant_model
+        ]
+        for cand in _ROUTING_CANDIDATES:
+            if cand == dominant_model:
+                continue
+            cand_price = _gmp_default(cand)
+            if cand_price is None:
+                continue
+            cand_split = _compute_split_default(
+                baseline_model=dominant_model,
+                candidate_model=cand,
+                baseline_call_costs=baseline_call_costs_default,
+                candidate_price=cand_price,
+                window_days=window_days,
+                observed_span_days=observed_span,
+            )
+            cand_splits[cand] = cand_split
+            cand_split_newspend[cand] = _full_dataset_split_newspend(
+                total_cost=total_cost,
+                split=cand_split,
+                monthly_factor=monthly_factor,
+            )
+
+        if split_routing:
+            # The split headline's own routing target is the winner of the SAME
+            # :func:`_select_cheapest_eligible` rule the explicit-``--candidates``
+            # path uses — full-dataset New-spend, display-precision quality
+            # tie-break, name tie-break — run over the built-in pool. Every
+            # entry in ``_ROUTING_CANDIDATES`` is rated (``test_candidate_pool``
+            # pins this), so ``rated_only=True`` never actually excludes a
+            # candidate here; it is passed for consistency with the explicit
+            # path's call and as a defensive guard if the roster ever changes.
+            # Overriding ``candidate_model``/``projected_cost`` here (rather
+            # than leaving the ``_best_candidate`` wholesale pick in place) is
+            # what makes ``result.candidate_model`` and ``result.split.candidate_model``
+            # PROVABLY the same value — the two could previously coincide only
+            # by accident, since ``_best_candidate`` is tier-capped and ranks on
+            # blended per-token price while the split needs the uncapped,
+            # New-spend-ranked pick.
+            baseline_newspend_default = (
+                total_cost * monthly_factor if monthly_factor is not None else total_cost
+            )
+            split_target = _select_cheapest_eligible(
+                _ROUTING_CANDIDATES,
+                cand_split_newspend=cand_split_newspend,
+                baseline_newspend=baseline_newspend_default,
+                rated_only=True,
+            )
+            if split_target is not None:
+                candidate_model = split_target
+                # ``projected_cost`` carries the full-SWAP total (every call
+                # repriced at the candidate) — used solely for the "Upper
+                # bound" line — recomputed here for the split's OWN target so
+                # it stays internally consistent with the just-overridden
+                # ``candidate_model``, exactly as the explicit-candidates path
+                # does for its own selection.
+                _target_price = _gmp_default(split_target)
+                if _target_price is not None:
+                    _swap_total = Decimal("0")
+                    for cc in priced:
+                        _swap_total += _target_price.input_cost_per_token * Decimal(
+                            cc.record.prompt_tokens
+                        )
+                        _swap_total += _target_price.output_cost_per_token * Decimal(
+                            cc.record.completion_tokens
+                        )
+                    projected_cost = _swap_total
 
     # Compute tier_drop: only defined when both baseline and candidate have known tiers.
     tier_drop: int | None = None
@@ -1157,31 +1332,19 @@ def analyze_records(
     # no LLM, no network.  Disabled by --wholesale (split_routing=False).
     split: SplitRouting | None = None
     if split_routing:
-        if candidates:
-            # Explicit ``--candidates``: the headline split IS the chosen routing
-            # target's pre-computed split (the candidate with the cheapest
-            # full-dataset New-spend).  We do NOT re-run select_easy_target here —
-            # doing so would re-introduce the divergence this fix removes, because
-            # select_easy_target ranks on blended per-token price, not on the
-            # full-dataset New-spend the panel actually shows.  Reusing
-            # ``cand_splits[candidate_model]`` guarantees the headline panel, the
-            # routing-target name, and the block's "recommended" row are one and
-            # the same split.
-            if candidate_model is not None and candidate_model in cand_splits:
-                split = cand_splits[candidate_model]
-        else:
-            from frugon.routing import build_split
-
-            baseline_call_costs = [
-                cc for cc in priced if cc.record.model == dominant_model
-            ]
-            split = build_split(
-                baseline_model=dominant_model,
-                baseline_call_costs=baseline_call_costs,
-                pool=_ROUTING_CANDIDATES,
-                window_days=window_days,
-                observed_span_days=observed_span,
-            )
+        # Both the explicit-``--candidates`` path and the default-pool path
+        # picked ``candidate_model`` via the SAME :func:`_select_cheapest_eligible`
+        # rule above (full-dataset New-spend, display-precision quality
+        # tie-break, name tie-break), and both populated ``cand_splits`` for
+        # every priced candidate they considered — so reusing
+        # ``cand_splits[candidate_model]`` here, for EITHER path, guarantees the
+        # headline panel, the routing-target name, and the block's
+        # "recommended" row are always one and the same split, on one and the
+        # same basis.  This is what closes the caption-truth gap: the
+        # recommended row can never print a cheaper number than the row it is
+        # tagged against, because both come from the same selection.
+        if candidate_model is not None and candidate_model in cand_splits:
+            split = cand_splits[candidate_model]
 
     # ----- Per-candidate projections (multi-candidate transparency) ----------
     # When --candidates lists more than one model, surface ALL of them in the
@@ -1189,7 +1352,92 @@ def analyze_records(
     # Each candidate is projected on a SPLIT basis (route easy baseline calls to
     # that candidate, keep hard calls on baseline) so every row is directly
     # comparable to the headline New-spend / saving%.
-    # Empty list == no extra rendering (--demo / single-candidate paths unchanged).
+    # Empty list == no extra rendering (single-candidate paths unchanged).
+    #
+    # Baseline reference (full dataset) for every row's saving%, shared by both
+    # the explicit-``--candidates`` branch and the default-pool branch below.
+    # Monthly when a projection basis exists, else the observed total —
+    # matching the unit the New-spend figure is quoted in.
+    full_current_monthly = monthly_cost  # full-dataset monthly current (or None)
+    full_current_observed = total_cost  # full-dataset observed current
+
+    def _build_candidate_projection(cand: str, status: str) -> CandidateProjection:
+        """Build one candidate's row from its precomputed split (see cand_splits).
+
+        Shared by the explicit-``--candidates`` path and the default-pool path so
+        every row's money/saving% arithmetic is computed exactly once, on the
+        SAME full-dataset split New-spend basis the headline reads from
+        (``cand_splits`` / ``cand_split_newspend``), regardless of which pool the
+        candidate came from.
+        """
+        cand_split = cand_splits[cand]
+
+        # ----- Monthly figures (full-dataset New-spend) ----------------------
+        # New-spend = full current monthly - routing reduction on the baseline's
+        # easy calls.  saving = reduction; pct = reduction / full current
+        # monthly — the exact denominator the headline panel uses (saved /
+        # current over the WHOLE dataset), so the recommended row reconciles
+        # with the headline to the cent.
+        monthly_c: Decimal | None
+        monthly_saving_val: Decimal | None
+        saving_pct_val: Decimal | None
+        if (
+            full_current_monthly is not None
+            and cand_split.monthly_baseline is not None
+            and cand_split.monthly_blended is not None
+        ):
+            reduction_m = cand_split.monthly_baseline - cand_split.monthly_blended
+            monthly_c = full_current_monthly - reduction_m
+            monthly_saving_val = reduction_m
+            saving_pct_val = (
+                (reduction_m / full_current_monthly) * Decimal("100")
+                if full_current_monthly > Decimal("0")
+                else None
+            )
+        else:
+            monthly_c = None
+            monthly_saving_val = None
+            saving_pct_val = None
+
+        # ----- Observed figures (full-dataset New-spend) ----------------------
+        # Always populated so the block still has numbers when there is no
+        # monthly projection basis.  Same full-dataset arithmetic on the
+        # observed (un-extrapolated) totals.
+        reduction_o = cand_split.baseline_cost - cand_split.blended_cost
+        obs_cost = full_current_observed - reduction_o
+        obs_saving = reduction_o
+        obs_pct = (
+            (reduction_o / full_current_observed) * Decimal("100")
+            if full_current_observed > Decimal("0")
+            else None
+        )
+        cand_tier = _get_model_tier(cand)
+        tier_label = _quality_tier_name(cand_tier) or "Unrated"
+        return CandidateProjection(
+            model=cand,
+            status=status,
+            monthly_cost=monthly_c,
+            monthly_saving=monthly_saving_val,
+            saving_pct=saving_pct_val,
+            observed_cost=obs_cost,
+            observed_saving=obs_saving,
+            observed_saving_pct=obs_pct,
+            tier_label=tier_label,
+        )
+
+    def _candidate_status(cand: str) -> str:
+        """recommended / considered / more_expensive for *cand*, on the split basis."""
+        cand_newspend = cand_split_newspend[cand]
+        cand_baseline_ref = (
+            full_current_monthly
+            if full_current_monthly is not None
+            else full_current_observed
+        )
+        beats_split = cand_newspend < cand_baseline_ref
+        if cand == candidate_model:
+            return "recommended"
+        return "considered" if beats_split else "more_expensive"
+
     candidate_projections: list[CandidateProjection] = []
     if candidates and len(candidates) > 1:
         # Reuse the per-candidate splits computed once in the selection pass —
@@ -1205,93 +1453,51 @@ def analyze_records(
         # on the baseline, leave already-cheaper calls untouched, over the WHOLE
         # dataset — so the recommended row equals the headline New-spend to the
         # cent and gpt-4o-style "two different numbers" can never appear.
-        #
-        # Baseline reference (full dataset) for each row's saving%.  Monthly when
-        # a projection basis exists, else the observed total — matching the unit
-        # the New-spend figure is quoted in.
-        full_current_monthly = monthly_cost  # full-dataset monthly current (or None)
-        full_current_observed = total_cost  # full-dataset observed current
-
         for cand in candidates:
             if cand == dominant_model:
                 continue
             if cand in cand_splits:
-                cand_split = cand_splits[cand]
                 # "beats baseline" is decided on the SAME full-dataset New-spend
                 # basis the headline ranking uses — never on the dominant-only
                 # blended figure — so a candidate's tag and its row number agree.
-                cand_newspend = cand_split_newspend[cand]
-                cand_baseline_ref = (
-                    full_current_monthly
-                    if full_current_monthly is not None
-                    else full_current_observed
-                )
-                beats_split = cand_newspend < cand_baseline_ref
-                if cand == candidate_model:
-                    status = "recommended"
-                elif beats_split:
-                    status = "considered"
-                else:
-                    status = "more_expensive"
-
-                # ----- Monthly figures (full-dataset New-spend) --------------
-                # New-spend = full current monthly - routing reduction on the
-                # baseline's easy calls.  saving = reduction; pct = reduction /
-                # full current monthly — the exact denominator the headline panel
-                # uses (saved / current over the WHOLE dataset), so the
-                # recommended row reconciles with the headline to the cent.
-                monthly_c: Decimal | None
-                monthly_saving_val: Decimal | None
-                saving_pct_val: Decimal | None
-                if (
-                    full_current_monthly is not None
-                    and cand_split.monthly_baseline is not None
-                    and cand_split.monthly_blended is not None
-                ):
-                    reduction_m = (
-                        cand_split.monthly_baseline - cand_split.monthly_blended
-                    )
-                    monthly_c = full_current_monthly - reduction_m
-                    monthly_saving_val = reduction_m
-                    saving_pct_val = (
-                        (reduction_m / full_current_monthly) * Decimal("100")
-                        if full_current_monthly > Decimal("0")
-                        else None
-                    )
-                else:
-                    monthly_c = None
-                    monthly_saving_val = None
-                    saving_pct_val = None
-
-                # ----- Observed figures (full-dataset New-spend) -------------
-                # Always populated so the block still has numbers when there is no
-                # monthly projection basis.  Same full-dataset arithmetic on the
-                # observed (un-extrapolated) totals.
-                reduction_o = cand_split.baseline_cost - cand_split.blended_cost
-                obs_cost = full_current_observed - reduction_o
-                obs_saving = reduction_o
-                obs_pct = (
-                    (reduction_o / full_current_observed) * Decimal("100")
-                    if full_current_observed > Decimal("0")
-                    else None
-                )
                 candidate_projections.append(
-                    CandidateProjection(
-                        model=cand,
-                        status=status,
-                        monthly_cost=monthly_c,
-                        monthly_saving=monthly_saving_val,
-                        saving_pct=saving_pct_val,
-                        observed_cost=obs_cost,
-                        observed_saving=obs_saving,
-                        observed_saving_pct=obs_pct,
-                    )
+                    _build_candidate_projection(cand, _candidate_status(cand))
                 )
             elif cand in cand_unpriced:
                 candidate_projections.append(
                     CandidateProjection(model=cand, status="unpriced")
                 )
             # Else: cand == dominant_model already skipped; defensive no-op.
+    elif used_default_pool and split is not None:
+        # Default pool, no explicit --candidates: real users — and the un-pinned
+        # demo — should SEE what was considered, not just the winner.  Cap to the
+        # recommended candidate (the split's own routing target) plus the
+        # next-4-cheapest candidates that ALSO beat the baseline on the same
+        # full-dataset split New-spend basis (5 rows max) — never the more-
+        # expensive or unpriced tail of the built-in roster, which would just be
+        # noise on the default view.  Ranking uses the SAME cand_split_newspend
+        # populated above (identical arithmetic to the explicit-candidates path),
+        # so this is a populate+render change, not new math.
+        recommended_model = split.candidate_model
+        baseline_ref = (
+            full_current_monthly
+            if full_current_monthly is not None
+            else full_current_observed
+        )
+        beating_others = sorted(
+            (
+                cand
+                for cand, ns in cand_split_newspend.items()
+                if cand != recommended_model and ns < baseline_ref
+            ),
+            key=lambda cand: (cand_split_newspend[cand], cand),
+        )
+        ranked_models = [recommended_model, *beating_others[:4]]
+        candidate_projections = [
+            _build_candidate_projection(cand, _candidate_status(cand))
+            for cand in ranked_models
+            if cand in cand_splits
+        ]
 
     return AnalysisResult(
         total_calls=len(call_costs),

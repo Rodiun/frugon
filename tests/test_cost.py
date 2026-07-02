@@ -947,14 +947,28 @@ class TestQualityTierRouting:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Arrange: gpt-4o as the dominant baseline model.
-        Act: analyze_logs (auto-detect candidate).
-        Assert: candidate_model is NOT gpt-4o-mini — the quality gap is too large.
+        Act: _best_candidate directly (the WHOLESALE selector's own tier cap).
+        Assert: it does NOT pick gpt-4o-mini — the quality gap is too large.
 
-        This test exercises the max_tier_drop=1 guard (§6 honest savings), so it
-        PINS the tiers it needs rather than reading the live seed: gpt-4o (tier 0)
-        → gpt-4o-mini (tier 2) is a two-tier drop > 1, so gpt-4o-mini must be
-        excluded from auto-selection. Pinning keeps the guard genuinely exercised
-        regardless of leaderboard re-anchors (which now place both at tier 2).
+        This test exercises the max_tier_drop=1 guard (§6 honest savings) that
+        lives specifically in :func:`frugon.cost._best_candidate` — the
+        FULL-SWAP/wholesale selector, which caps the tier drop because a
+        wholesale swap moves EVERY call. It PINS the tiers it needs rather than
+        reading the live seed: gpt-4o (tier 0) → gpt-4o-mini (tier 2) is a
+        two-tier drop > 1, so gpt-4o-mini must be excluded from wholesale
+        auto-selection.
+
+        Since the 2026-07-02 quality-aware tie-break fix unified
+        ``result.candidate_model`` with ``result.split.candidate_model`` on the
+        DEFAULT (split-active) analysis path, this test asserts directly
+        against ``_best_candidate`` — the one function that actually owns this
+        tier-cap guarantee — rather than ``analyze_logs(...).candidate_model``,
+        which now reflects the split recommendation (intentionally UNCAPPED by
+        tier, same as it always was via ``select_easy_target`` — the per-call
+        easy/hard gate is that path's quality protection, not a tier cap; see
+        ``test_wholesale_candidate_model_still_respects_tier_cap`` below for the
+        end-to-end ``--wholesale`` proof that the cap still gates the real
+        analysis output on that surface).
         """
         install_synthetic_quality(monkeypatch, tmp_path, {"gpt-4o": 0, "gpt-4o-mini": 2})
 
@@ -968,15 +982,43 @@ class TestQualityTierRouting:
             }
             for _ in range(10)
         ]
-        path = _write_jsonl(records, tmp_path)
+        records_parsed = [parse_record(r) for r in records]
+        call_costs = [compute_call_cost(r) for r in records_parsed if r is not None]
 
         # Act
-        result = analyze_logs(path)
+        candidate_model, _projected_cost = _best_candidate("gpt-4o", call_costs)
 
         # Assert
+        assert candidate_model != "gpt-4o-mini", (
+            "gpt-4o baseline must NOT auto-recommend gpt-4o-mini (two quality tiers down) "
+            f"via the wholesale selector. Got candidate_model={candidate_model!r}"
+        )
+
+    def test_wholesale_candidate_model_still_respects_tier_cap(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end proof: on the real --wholesale surface (split_routing=False),
+        analyze_logs(...).candidate_model IS the tier-capped _best_candidate pick
+        — the tier cap still gates the actual analysis output, just not on the
+        default split-active surface (see the test above)."""
+        install_synthetic_quality(monkeypatch, tmp_path, {"gpt-4o": 0, "gpt-4o-mini": 2})
+        records = [
+            {
+                "model": "gpt-4o",
+                "request": {"messages": [{"role": "user", "content": "classify this email"}]},
+                "response": {"choices": [{"message": {"role": "assistant", "content": "billing"}}]},
+                "usage": {"prompt_tokens": 50, "completion_tokens": 5},
+            }
+            for _ in range(10)
+        ]
+        path = _write_jsonl(records, tmp_path)
+
+        result = analyze_logs(path, split_routing=False)
+
+        assert result.split is None
         assert result.candidate_model != "gpt-4o-mini", (
-            "gpt-4o baseline must NOT auto-recommend gpt-4o-mini (two quality tiers down). "
-            f"Got candidate_model={result.candidate_model!r}"
+            "the --wholesale (split_routing=False) surface must still respect "
+            f"the tier cap. Got candidate_model={result.candidate_model!r}"
         )
 
     def test_best_candidate_gpt4turbo_baseline_recommends_cheaper_in_tolerance_candidate(
@@ -2228,10 +2270,18 @@ class TestMultiCandidateProjections:
         )
         assert result.candidate_projections == []
 
-    def test_empty_when_no_candidates(self, tmp_path: Path) -> None:
-        """No --candidates: the auto-detect path; no per-candidate block ever."""
+    def test_default_pool_populates_capped_transparency_block(
+        self, tmp_path: Path
+    ) -> None:
+        """No --candidates: the default-pool path now DOES populate a capped
+        "Candidates considered" transparency block (PD-directed 2026-07-02) —
+        real users and the un-pinned demo see what was considered, not just the
+        winner. Capped to the recommended candidate plus the next-4-cheapest
+        that also beat the baseline (5 rows max; see analyze_records)."""
         result = analyze_logs(self._gpt4t_log(tmp_path))
-        assert result.candidate_projections == []
+        assert result.used_default_pool is True
+        assert 1 < len(result.candidate_projections) <= 5
+        assert result.candidate_projections[0].status == "recommended"
 
     def test_multi_candidate_tags_recommended_considered_unpriced(
         self, tmp_path: Path
@@ -2444,8 +2494,12 @@ class TestCandidateProjectionSplitBasis:
             )
             assert rec.monthly_cost == expected
 
-    def test_demo_no_candidates_has_empty_projections(self, tmp_path: Path) -> None:
-        """No --candidates: candidate_projections stays empty (--demo path unchanged)."""
+    def test_demo_no_candidates_populates_capped_default_pool_block(
+        self, tmp_path: Path
+    ) -> None:
+        """No --candidates: the default-pool block populates (PD-directed
+        2026-07-02) — capped to the recommended candidate plus the
+        next-4-cheapest that also beat the baseline (5 rows max)."""
         import json
 
         records = [
@@ -2461,6 +2515,7 @@ class TestCandidateProjectionSplitBasis:
         path = tmp_path / "simple.jsonl"
         path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
         result = analyze_logs(path)
-        assert result.candidate_projections == [], (
-            "no-candidates path must have empty candidate_projections"
+        assert 1 < len(result.candidate_projections) <= 5, (
+            "default-pool run should populate a capped candidate_projections list"
         )
+        assert result.candidate_projections[0].status == "recommended"

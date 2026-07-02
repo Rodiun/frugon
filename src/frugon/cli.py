@@ -911,16 +911,23 @@ def analyze(
         #     here; and
         #   * the explicit --candidates, when the user named them (their stated
         #     intent), so a typo or missing key surfaces immediately; OR, when
-        #     no --candidates are given, the split-routing's RECOMMENDED
-        #     candidate — the very model the headline saving is computed against
-        #     (e.g. gpt-4o-mini).  That recommendation is selected offline from
-        #     the dominant baseline + the built-in pool by exactly the same
-        #     select_easy_target() the full analysis uses, so it is cheap to
-        #     know here and is the candidate --measure will actually sample.
-        #     Verifying its key up front means the pre-check names the real
-        #     switch frugon recommends — not a separately auto-selected model.
+        #     no --candidates are given, a CHEAP PREDICTION of the split-routing
+        #     recommendation (see ``predicted_default_candidate`` below).
         # --judge adds the judge model, which is always invoked when set.
+        #
+        # The default-pool prediction is advisory, not authoritative (see the
+        # comment on ``predicted_default_candidate``): it is checked SEPARATELY
+        # from precheck_models, right below, so a wrong prediction never blocks
+        # a run whose real key requirement it happened to guess incorrectly.
+        # ``run_measure`` itself re-verifies every key against the REAL,
+        # post-analysis model list before any provider call (measure.py,
+        # ``_check_provider_keys(all_models)`` inside ``run_measure``) and is
+        # caught cleanly by the ``except MissingProviderKeyError`` around the
+        # actual sampling call further below — that is the single source of
+        # truth; this cheap pre-check exists purely to fail fast in the COMMON
+        # case where the prediction happens to be right.
         precheck_models: list[str] = []
+        predicted_default_candidate: str | None = None
         if _dominant_model:
             precheck_models.append(_dominant_model)
         if candidate_list:
@@ -936,18 +943,27 @@ def analyze(
 
             precheck_models.append(_DEMO_MEASURE_CANDIDATE)
         elif _dominant_model and not wholesale:
-            # No explicit --candidates and split routing is active (the default):
-            # the default measured candidate is the split recommendation.  Derive
-            # it from the same offline selector the analysis uses so the key we
-            # verify here is the key the sampled model needs.  None when no rated,
-            # priced, strictly-cheaper candidate exists — the backstop covers
-            # that residual case.
+            # No explicit --candidates and split routing is active (the
+            # default): CHEAPLY PREDICT the split recommendation via
+            # select_easy_target's blended-per-token-price selection — the same
+            # heuristic the real analysis USED TO use exclusively. Since the
+            # 2026-07-02 quality-aware tie-break fix, the real analysis instead
+            # selects on FULL-DATASET split New-spend with a display-precision
+            # quality tie-break (frugon.cost._select_cheapest_eligible), which
+            # needs per-call cost data this cheap scan_models() pass does not
+            # have — so the two can now genuinely disagree on some logs (a
+            # model that is cheapest on blended-per-token price is not always
+            # cheapest once the actual easy/hard call mix is priced out). A
+            # wrong prediction here must NOT block the run (see the comment
+            # above precheck_models) — it is verified SEPARATELY, non-fatally,
+            # purely as a fast-fail nicety for the common case where the two
+            # bases agree.
             from frugon.cost import _ROUTING_CANDIDATES
             from frugon.routing import select_easy_target
 
-            recommended = select_easy_target(_dominant_model, _ROUTING_CANDIDATES)
-            if recommended:
-                precheck_models.append(recommended)
+            predicted_default_candidate = select_easy_target(
+                _dominant_model, _ROUTING_CANDIDATES
+            )
         if judge:
             # Resolve the judge BEFORE the key pre-check so the key we verify up
             # front is the key the judge run_measure will ACTUALLY invoke needs.
@@ -975,6 +991,36 @@ def analyze(
             with progress_reporter(no_progress=no_progress) as pre_progress:
                 with pre_progress.spinner("Loading the measure engine…"):
                     verify_measure_prerequisites(precheck_models)
+                    # Best-effort, NON-FATAL fast-fail for the predicted default
+                    # candidate (see the comment above predicted_default_candidate):
+                    # when the key is already missing for the prediction, WARN now
+                    # (most of the time the prediction is right, so this still
+                    # surfaces the common missing-key case immediately) but do NOT
+                    # exit — a wrong prediction (a rare divergence between the
+                    # cheap blended-price heuristic and the real full-dataset
+                    # New-spend selection) must never block a run that does not
+                    # actually need this key. run_measure's own
+                    # _check_provider_keys(all_models) — the authoritative,
+                    # always-correct check against the REAL model list — still
+                    # fires before any provider call and is caught by the
+                    # MissingProviderKeyError handler around the sampling call
+                    # further below, so a genuinely missing key for the ACTUAL
+                    # candidate is still caught (and still exits 1), just one step
+                    # later with the real model named instead of the guess.
+                    if predicted_default_candidate is not None:
+                        try:
+                            verify_measure_prerequisites(
+                                [predicted_default_candidate]
+                            )
+                        except MissingProviderKeyError as _predicted_exc:
+                            _missing = ", ".join(_predicted_exc.missing_vars)
+                            rprint(
+                                f"[dim]Heads up: {predicted_default_candidate} "
+                                f"(frugon's likely recommendation) needs "
+                                f"{_missing} — set it now, or continue and "
+                                "frugon will confirm the actual recommendation "
+                                "before sampling.[/dim]"
+                            )
         except ImportError:
             _render_missing_extra()
             raise typer.Exit(code=1) from None
@@ -984,7 +1030,17 @@ def analyze(
             _render_unknown_model(exc)
             raise typer.Exit(code=2) from None
         except MissingProviderKeyError as exc:
-            _render_missing_key(exc, measured_models=precheck_models)
+            # Include the predicted default candidate in the DISPLAY list even
+            # though it is not part of the blocking precheck_models — the panel
+            # is more honest when it shows the full "will sample: baseline,
+            # candidate" line, even while the exception itself is about a
+            # DIFFERENT (blocking) model's key, e.g. the baseline's.
+            _display_models = (
+                [*precheck_models, predicted_default_candidate]
+                if predicted_default_candidate is not None
+                else precheck_models
+            )
+            _render_missing_key(exc, measured_models=_display_models)
             raise typer.Exit(code=1) from None
 
     # Run analysis — fail loud with a friendly message on read/encoding errors

@@ -283,6 +283,32 @@ class MeasureResult:
 
 # Maps a lowercase model-name prefix to the environment variable that must
 # be present.  Checked before any network call is made.
+#
+# The seven ``deepseek-``/``grok-``/``kimi-``/``glm-``/``minimax-``/``qwen-``
+# entries (FRG-OSS-034 23-model roster, added 2026-07-02) were added after a
+# gap: the roster's default candidate pool grew from 10 to 23 models across
+# 11 vendors, but this map was never extended to match, so ``--measure`` /
+# ``--judge`` against any of these bare names silently skipped the provider-key
+# precheck entirely (no key required -> no key checked) and then failed at the
+# actual sample call with a bare "bad request" cell (see
+# :data:`_LITELLM_ROUTE_PREFIX` below for why the bare names need a routing
+# prefix too, not just a key).  Every env var name below is verified against
+# the LiteLLM source in this repo's own ``.venv`` (``litellm/llms/<vendor>/
+# chat/transformation.py``, ``get_secret_str(...)`` call) — not guessed:
+#   deepseek/chat/transformation.py   -> DEEPSEEK_API_KEY
+#   xai/chat/transformation.py        -> XAI_API_KEY
+#   moonshot/chat/transformation.py   -> MOONSHOT_API_KEY
+#   zai/chat/transformation.py        -> ZAI_API_KEY   (NOT "zhipu" — Z.ai's
+#                                         LiteLLM integration module is named
+#                                         "zai", and that is the var it reads)
+#   minimax/chat/transformation.py    -> MINIMAX_API_KEY
+#   dashscope/chat/transformation.py  -> DASHSCOPE_API_KEY (Qwen's LiteLLM
+#                                         provider is "dashscope" — Alibaba
+#                                         Cloud's model API, not a "qwen" var)
+# The two Llama-4 reference-host models (llama-4-maverick-17b-128e-instruct,
+# llama-4-scout-17b-16e-instruct) already route via Groq (GROQ_API_KEY) — see
+# _LITELLM_ROUTE_PREFIX; the "groq/" prefix entry above already covers them
+# once _route_for_measure prepends it, so no new key entry is needed for them.
 _PROVIDER_KEY_MAP: dict[str, str] = {
     "gpt-": "OPENAI_API_KEY",
     "o1": "OPENAI_API_KEY",
@@ -303,7 +329,83 @@ _PROVIDER_KEY_MAP: dict[str, str] = {
     "azure/": "AZURE_API_KEY",
     "bedrock/": "AWS_ACCESS_KEY_ID",
     "vertex_ai/": "VERTEXAI_PROJECT",
+    "deepseek-": "DEEPSEEK_API_KEY",
+    "grok-": "XAI_API_KEY",
+    "kimi-": "MOONSHOT_API_KEY",
+    "glm-": "ZAI_API_KEY",
+    "minimax-": "MINIMAX_API_KEY",
+    "qwen-": "DASHSCOPE_API_KEY",
+    # The two reference-host Llama-4 checkpoints route via Groq (see
+    # _LITELLM_ROUTE_PREFIX below) — GROQ_API_KEY, same var the "groq/" prefix
+    # entry above already maps, added explicitly for the BARE name since the
+    # roster's pricing/quality/CLI surfaces only ever use the bare form.
+    "llama-4-maverick-17b-128e-instruct": "GROQ_API_KEY",
+    "llama-4-scout-17b-16e-instruct": "GROQ_API_KEY",
 }
+
+
+# ---------------------------------------------------------------------------
+# Bare-name -> LiteLLM routing prefix (new-vendor gap, FRG-OSS-034 follow-up)
+# ---------------------------------------------------------------------------
+#
+# frugon's pricing/quality tables key every model on its BARE name (no
+# provider prefix) — that is the name shown throughout the CLI, the
+# "Candidates considered" block, and passed to ``--candidates``.  LiteLLM,
+# however, only infers a provider from a bare name for a handful of
+# "default-namespace" vendors (OpenAI, Anthropic, a few others); every other
+# vendor requires an explicit ``<provider>/`` prefix on the wire, or
+# ``litellm.completion`` raises ``BadRequestError: LLM Provider NOT provided``
+# — confirmed directly against this repo's own ``.venv`` LiteLLM install via
+# ``litellm.get_llm_provider(<bare-name>)`` for every entry below.  Without
+# this map, a real ``--measure``/``--judge`` run against any of these bare
+# names would reach ``_call_model``/``_judge_prompt``, make a doomed call, and
+# report a generic "[bad request — check model name and parameters]" cell —
+# not a crash (the existing try/except already catches it), but not truthful
+# about the actual, fixable cause either.  ``_route_for_measure`` prepends the
+# mapped prefix ONLY for the LiteLLM call; every other surface (reports,
+# pricing/quality lookups, ``--candidates`` matching) keeps using the bare
+# name unchanged.
+#
+# The two Llama-4 checkpoints are reference-host-priced via Groq (see
+# ``cost.py``'s ``_ROUTING_CANDIDATES`` comment) — Groq's own wire form nests
+# the "meta-llama/" org segment, which frugon's ``canonicalize()`` already
+# knows how to fold away in the other direction (see
+# ``model_id._GROQ_META_LLAMA_RE``); this map produces exactly that nested
+# form so measurement uses the SAME route the pricing seed already labels.
+# Invariant (enforced by tests/test_measure_precheck.py::TestRoutePrefixNoOverlap):
+# no key here is a proper prefix of another key — this dict mixes vendor
+# PREFIXES ("deepseek-") with FULL model names ("llama-4-scout-..."), and
+# _route_for_measure's startswith() match means a shorter key that happened to
+# prefix a longer one would make the match nondeterministic (dependent on dict
+# iteration order) — every entry added here must keep this true.
+_LITELLM_ROUTE_PREFIX: dict[str, str] = {
+    "deepseek-": "deepseek/",
+    "grok-": "xai/",
+    "kimi-": "moonshot/",
+    "glm-": "zai/",
+    "minimax-": "minimax/",
+    "qwen-": "dashscope/",
+    "llama-4-maverick-17b-128e-instruct": "groq/meta-llama/",
+    "llama-4-scout-17b-16e-instruct": "groq/meta-llama/",
+}
+
+
+def _route_for_measure(model: str) -> str:
+    """Return the model string to actually pass to ``litellm.completion``.
+
+    Bare names for the new-vendor roster entries (see
+    :data:`_LITELLM_ROUTE_PREFIX`) are not routable by LiteLLM on their own;
+    this prepends the vendor's required prefix so the ACTUAL sample/judge call
+    resolves to the right provider.  Every other model name (already-routable
+    bare defaults, or a name the user passed WITH its own gateway/provider
+    prefix already) is returned unchanged — this never adds a prefix twice and
+    never touches a name outside the mapped set.
+    """
+    lower = model.lower()
+    for bare, prefix in _LITELLM_ROUTE_PREFIX.items():
+        if lower == bare or lower.startswith(bare):
+            return prefix + model
+    return model
 
 
 def _required_key_for_model(model: str) -> str | None:
@@ -786,9 +888,17 @@ def _call_model(
     Pre-flight key checks are done in run_measure before any call reaches here,
     so authentication failures arriving here (e.g. key present but invalid) are
     treated as friendly cells rather than hard exceptions.
+
+    The wire call uses :func:`_route_for_measure` to prepend a provider prefix
+    for the new-vendor roster entries that LiteLLM cannot route from a bare
+    name — every returned/stored field keeps the ORIGINAL bare *model* name so
+    reports and ``--candidates`` matching are unaffected; only the string
+    handed to ``litellm.completion`` changes.
     """
     try:
-        response = litellm_mod.completion(model=model, messages=messages)
+        response = litellm_mod.completion(
+            model=_route_for_measure(model), messages=messages
+        )
         content: str = response.choices[0].message.content or ""
         pt, ct = _extract_usage(response)
         return SampledOutput(
@@ -948,11 +1058,15 @@ def _judge_pair(
         }
     ]
     # One call + up to *max_retries* extra attempts on a RAISED transient fault.
+    # ``_route_for_measure`` prepends a provider prefix for the new-vendor
+    # roster entries (see :data:`_LITELLM_ROUTE_PREFIX`) so a user-chosen
+    # ``--judge-model`` from that roster routes correctly; every other judge
+    # model (the OpenAI/Anthropic defaults) is returned unchanged.
     attempts = max(0, max_retries) + 1
     for attempt in range(attempts):
         try:
             response = litellm_mod.completion(
-                model=judge_model, messages=judge_messages
+                model=_route_for_measure(judge_model), messages=judge_messages
             )
         except Exception:
             # Transient (rate-limit, network blip): back off and retry while
