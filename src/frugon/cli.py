@@ -1105,6 +1105,23 @@ def analyze(
                 progress_cb=lambda done, total: pricing_task.advance(1),
             )
         progress.checkpoint(f"Priced in {sw.elapsed:.1f}s")
+        # The candidates comparison (route each priced candidate's easy/hard
+        # split against the baseline) runs INSIDE the analyze_records() call
+        # above, after the per-record pricing bar has already reached 100% —
+        # even with the redundant per-candidate difficulty reclassification
+        # closed (FRG-OSS-038), comparing a couple dozen candidates is real
+        # work, not free. Naming the count here (rather than a silent second
+        # or so of nothing between "Priced" and the panel) is the honest
+        # trail entry for that phase.
+        _n_candidates_compared = (
+            len(_effective_candidates)
+            if _effective_candidates is not None
+            else result.candidate_pool_size
+        )
+        if _n_candidates_compared > 1 and (
+            result.split is not None or result.candidate_model is not None
+        ):
+            progress.checkpoint(f"Compared {_n_candidates_compared} candidates")
         if result.split is not None or result.candidate_model is not None:
             progress.checkpoint("Routed")
 

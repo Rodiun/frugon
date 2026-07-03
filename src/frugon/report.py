@@ -839,6 +839,13 @@ def _candidate_cap_caption(result: AnalysisResult) -> str | None:
     Returns None when the cap does not apply — an explicit ``--candidates`` run,
     or a default-pool run where the block did not fire — so callers can skip the
     line entirely rather than print a caption for a block that isn't capped.
+
+    Retained (unchanged) for the explicit ``--candidates`` path's caption
+    behaviour and as the historical prose this function documents; the
+    DEFAULT-pool surface now renders the header-line + bullet-legend built by
+    :func:`_candidates_header_title` and :func:`_candidate_legend_lines`
+    instead of this sentence (PD-directed 2026-07-03 "2+3 hybrid" restructure)
+    — see those functions' docstrings.
     """
     if not result.used_default_pool:
         return None
@@ -851,6 +858,91 @@ def _candidate_cap_caption(result: AnalysisResult) -> str | None:
         f"the {shown - 1} next-cheapest. Pass --candidates to compare specific "
         "models."
     )
+
+
+# ---------------------------------------------------------------------------
+# Default-pool "2+3 hybrid" caption restructure (PD-directed 2026-07-03)
+# ---------------------------------------------------------------------------
+#
+# The two-paragraph caption above (``_candidate_caption`` + the cap line from
+# ``_candidate_cap_caption``) stays EXACTLY as-is for the explicit
+# ``--candidates`` path — that surface never shows a capped pool, so the
+# "cheapest split is the headline recommendation" prose is the whole story and
+# ``test_candidate_caption.py`` pins it verbatim.
+#
+# The DEFAULT pool (no explicit ``--candidates``) instead gets a "2+3 hybrid":
+# the pool/shown COUNTING moves into the table's header line (so the reader
+# sees "23 in pool, top 5 shown" before a single row), and the two paragraphs
+# of prose collapse into a three-bullet legend, one fact per line.  Both
+# helpers below are used ONLY on the default-pool branch — callers gate on
+# ``result.used_default_pool`` before reaching for them.
+
+
+def _candidates_header_title(result: AnalysisResult) -> str:
+    """Table title for the "Candidates considered" block.
+
+    Explicit ``--candidates`` path: unchanged — plain "Candidates considered",
+    no pool/cap claim (there is no cap on that path; every passed candidate is
+    shown).
+
+    Default-pool path: absorbs the counting that used to live in the trailing
+    cap-caption sentence — "Candidates considered · N in pool · top M shown".
+    Both counts are DERIVED, never hardcoded: the pool size comes from
+    ``result.candidate_pool_size`` (the live ``_ROUTING_CANDIDATES`` length)
+    and the shown count from the actual rendered row count
+    (``len(result.candidate_projections)``), so a roster change or a
+    fewer-than-5-row cap (not enough candidates beat the baseline) is
+    reflected honestly — "top 3 shown" when only 3 rows render, never a
+    hardcoded "top 5".
+    """
+    if not result.used_default_pool:
+        return "Candidates considered"
+    pool_size = result.candidate_pool_size
+    shown = len(result.candidate_projections)
+    return f"Candidates considered · {pool_size} in pool · top {shown} shown"
+
+
+def _candidate_legend_lines(
+    result: AnalysisResult, split: SplitRouting, *, has_judge_section: bool
+) -> list[str]:
+    """The default-pool block's 3-line bullet legend (replaces the old prose).
+
+    One fact per line, each prefixed with the same ``·`` bullet the header
+    line itself uses (visual consistency), dim-styled on every surface:
+
+      1. What every row represents — the shared quality-preserving split,
+         naming the actual baseline model so the claim is concrete, not
+         "baseline" as a generic noun.
+      2. The selection rule — biggest saving wins; the display-precision
+         quality tie-break (PD-ratified 2026-07-02, unchanged from the old
+         caption's second sentence).
+      3. The two actionable follow-ups — compare specific models, or measure
+         quality — conditional on whether a judge tally already follows this
+         block in the same output (mirrors the old caption's "below"-honesty
+         rule: never point at a section that is not actually there).
+
+    Only used on the DEFAULT-pool path; the explicit ``--candidates`` surface
+    keeps :func:`_candidate_caption`'s two-sentence prose unchanged.
+    """
+    line1 = (
+        f"Each row is the same quality-preserving split — easy calls "
+        f"→ candidate, hard calls kept on {split.baseline_model}"
+    )
+    line2 = (
+        "Biggest saving wins; ties at the precision shown go to the "
+        "higher quality tier"
+    )
+    if has_judge_section:
+        line3 = (
+            "Compare specific models with --candidates · each is "
+            "scored independently in the quality measurement below"
+        )
+    else:
+        line3 = (
+            "Compare specific models with --candidates · score "
+            "quality with --measure --judge"
+        )
+    return [line1, line2, line3]
 
 
 def _fmt_candidate_saving(pct_val: Decimal) -> str:
@@ -887,13 +979,20 @@ def _render_candidates_considered_terminal(
     run with >1 model, or the default pool's capped transparency block (see
     ``analyze_records``) — and is a no-op on the single-candidate path, so
     that surface stays byte-identical.
+
+    The header line and the caption below it differ by path (PD-directed
+    2026-07-03 "2+3 hybrid" restructure): the default pool absorbs its
+    pool/shown counts into the header title and swaps the old two-paragraph
+    prose for a three-bullet legend (see :func:`_candidates_header_title` /
+    :func:`_candidate_legend_lines`); the explicit ``--candidates`` path is
+    untouched — plain title, :func:`_candidate_caption` prose, no cap line.
     """
     projs = result.candidate_projections
     if len(projs) <= 1:
         return
 
     table = Table(
-        title="Candidates considered",
+        title=_candidates_header_title(result),
         title_justify="left",
         title_style="dim",
         box=None,
@@ -948,25 +1047,40 @@ def _render_candidates_considered_terminal(
         table.add_row(proj.model, money, saving, proj.tier_label, status_cell)
 
     rprint(Padding(table, (1, 0, 0, 2)))
-    # One-line caption beneath the block — explains WHY one was picked as the
-    # headline so the user reads the row tags correctly.
-    rprint(
-        Padding(
-            Text(_candidate_caption(has_judge_section), style="dim"),
-            (0, 0, 0, 2),
-        )
-    )
-    # Default-pool cap caption — an additional honest line telling the user the
-    # FULL built-in pool was considered, not just the rows shown.  None (no-op)
-    # on the explicit --candidates path, where every passed candidate is shown.
-    cap_caption = _candidate_cap_caption(result)
-    if cap_caption is not None:
+    if result.used_default_pool and result.split is not None:
+        # Default-pool "2+3 hybrid": the header already carries the pool/shown
+        # counts, so the caption below is a plain 3-bullet legend — one fact
+        # per line, no counting prose to repeat.  Printed via _print_hanging
+        # (the split-footer precedent) rather than a raw Padding(Text(...)) so
+        # a wrapped continuation on a narrow terminal hangs under the bullet
+        # text at column 4 instead of falling back to the left margin — the
+        # SAME hang-indent discipline every other footer line in this module
+        # already gets.  MD/HTML render real list markup, which already hangs
+        # natively, so this fix is terminal-only.
+        for line in _candidate_legend_lines(
+            result, result.split, has_judge_section=has_judge_section
+        ):
+            _print_hanging(
+                Text(line, style="dim"),
+                hang=4,
+                prefix=Text("  · ", style="dim"),
+            )
+    else:
+        # Explicit --candidates path — unchanged two-paragraph prose.
         rprint(
             Padding(
-                Text(cap_caption, style="dim"),
+                Text(_candidate_caption(has_judge_section), style="dim"),
                 (0, 0, 0, 2),
             )
         )
+        cap_caption = _candidate_cap_caption(result)
+        if cap_caption is not None:
+            rprint(
+                Padding(
+                    Text(cap_caption, style="dim"),
+                    (0, 0, 0, 2),
+                )
+            )
 
 
 def _split_accounting(result: AnalysisResult, split: SplitRouting) -> tuple[int, list[str]]:
@@ -4968,12 +5082,18 @@ def _candidates_considered_md_lines(
     Model | Monthly cost | Vs. baseline | Quality tier | Status — one row per
     candidate.  Sits below the cost-analysis section and above the
     "## Details" / freshness block on every Markdown surface (split + wholesale).
+
+    Heading + caption differ by path (PD-directed 2026-07-03 "2+3 hybrid"):
+    the default pool absorbs its pool/shown counts into the heading text and
+    renders the caption as a 3-item bullet list instead of two prose
+    paragraphs; the explicit ``--candidates`` path is unchanged (plain
+    heading, the existing italic prose, no cap line).
     """
     projs = result.candidate_projections
     if len(projs) <= 1:
         return []
     lines: list[str] = [
-        "## Candidates considered",
+        f"## {_candidates_header_title(result)}",
         "",
         "| Model | Monthly cost | Vs. baseline | Quality tier | Status |",
         "|-------|-------------:|-------------:|--------------|--------|",
@@ -4993,10 +5113,18 @@ def _candidates_considered_md_lines(
         lines.append(
             f"| `{proj.model}` | {money} | {saving} | {proj.tier_label} | {label} |"
         )
-    lines += ["", f"_{_candidate_caption(has_judge_section)}_", ""]
-    cap_caption = _candidate_cap_caption(result)
-    if cap_caption is not None:
-        lines += [f"_{cap_caption}_", ""]
+    lines.append("")
+    if result.used_default_pool and result.split is not None:
+        for line in _candidate_legend_lines(
+            result, result.split, has_judge_section=has_judge_section
+        ):
+            lines.append(f"- {line}")
+        lines.append("")
+    else:
+        lines += [f"_{_candidate_caption(has_judge_section)}_", ""]
+        cap_caption = _candidate_cap_caption(result)
+        if cap_caption is not None:
+            lines += [f"_{cap_caption}_", ""]
     return lines
 
 
@@ -5012,6 +5140,13 @@ def _candidates_considered_html(
     differ per style, but the inner table is identical so the figures are the
     SAME across surfaces).  Status tag styling mirrors the routing-plan badge
     vocabulary so the block reads as part of the same surface.
+
+    The caption below the table differs by path (PD-directed 2026-07-03 "2+3
+    hybrid"): the default pool renders a ``<ul>`` bullet legend instead of the
+    two ``<p class="caption">`` paragraphs; the explicit ``--candidates`` path
+    is unchanged.  The card's own eyebrow heading (rendered by each of the
+    three HTML callers, not by this function) uses
+    :func:`_candidates_header_title` for the same pool/shown counting move.
     """
     projs = result.candidate_projections
     if len(projs) <= 1:
@@ -5062,15 +5197,28 @@ def _candidates_considered_html(
         "</tr></thead><tbody>"
         + "".join(rows)
         + "</tbody></table>"
-        '<p class="caption candidates-caption">'
-        + esc(_candidate_caption(has_judge_section))
-        + "</p>"
         + (
-            '<p class="caption candidates-caption">'
-            + esc(cap_caption)
-            + "</p>"
-            if (cap_caption := _candidate_cap_caption(result)) is not None
-            else ""
+            '<ul class="caption candidates-caption candidates-legend">'
+            + "".join(
+                f"<li>{esc(line)}</li>"
+                for line in _candidate_legend_lines(
+                    result, result.split, has_judge_section=has_judge_section
+                )
+            )
+            + "</ul>"
+            if result.used_default_pool and result.split is not None
+            else (
+                '<p class="caption candidates-caption">'
+                + esc(_candidate_caption(has_judge_section))
+                + "</p>"
+                + (
+                    '<p class="caption candidates-caption">'
+                    + esc(cap_caption)
+                    + "</p>"
+                    if (cap_caption := _candidate_cap_caption(result)) is not None
+                    else ""
+                )
+            )
         )
         + "</div>"
     )
@@ -5952,6 +6100,13 @@ _CANDIDATES_TABLE_V1_CSS = """
 .candidates-caption{
   font-size:.8rem;color:var(--ink-dim);line-height:1.6;margin-top:.75rem;
 }
+/* Default-pool bullet legend — a <ul> standing in for the old prose
+   paragraphs; strip default list markers/indent since each <li> supplies its
+   own literal "·" bullet character, matching the terminal/Markdown surfaces. */
+.candidates-legend{list-style:none;margin:.75rem 0 0;padding:0}
+.candidates-legend li{margin:0 0 .25rem;padding-left:1rem;position:relative}
+.candidates-legend li:last-child{margin-bottom:0}
+.candidates-legend li::before{content:"\\00b7";position:absolute;left:0}
 """
 
 _HTML_CSS = _HTML_CSS + _CANDIDATES_TABLE_V1_CSS
@@ -6298,7 +6453,7 @@ def _render_html_v1_split_body(
     if _cand_html:
         parts.append(
             '<div class="card">'
-            '<div class="eyebrow">Candidates considered</div>'
+            f'<div class="eyebrow">{esc(_candidates_header_title(result))}</div>'
             + _cand_html
             + "</div>"
         )
@@ -6580,7 +6735,7 @@ def render_html(
         if _cand_html:
             body_parts.append(
                 '<div class="card">'
-                '<div class="eyebrow">Candidates considered</div>'
+                f'<div class="eyebrow">{_esc(_candidates_header_title(result))}</div>'
                 + _cand_html
                 + "</div>"
             )
@@ -7191,6 +7346,11 @@ code{
 .tbl-candidates .badge-unpriced{color:var(--ink-dim)}
 /* Caption beneath the block — v2's standard dim caption treatment. */
 .candidates-caption{font-size:13px;color:var(--ink-dim);line-height:1.65;margin-top:14px}
+/* Default-pool bullet legend — see v1's identical rule for rationale. */
+.candidates-legend{list-style:none;margin:14px 0 0;padding:0}
+.candidates-legend li{margin:0 0 4px;padding-left:16px;position:relative}
+.candidates-legend li:last-child{margin-bottom:0}
+.candidates-legend li::before{content:"\\00b7";position:absolute;left:0}
 """
 
 _HTML_TEMPLATE_V2 = """\
@@ -7492,7 +7652,7 @@ def _render_html_v2_split_body(
     if _cand_html:
         parts.append(
             '<section class="below">'
-            '<div class="eyebrow">Candidates considered</div>'
+            f'<div class="eyebrow">{esc(_candidates_header_title(result))}</div>'
             + _cand_html
             + "</section>"
         )

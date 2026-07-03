@@ -208,15 +208,19 @@ class TestDefaultPoolBlockRendersOnEverySurface:
     def test_terminal_renders_the_block_and_cap_caption(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        """The default-pool header line carries the pool/shown counts (the
+        "2+3 hybrid" restructure, PD-directed 2026-07-03) and the bullet
+        legend carries the actionable follow-up — replacing the old
+        "next-cheapest" / cap-caption prose."""
         result = _demo_result()
         render_terminal(result)
         out = " ".join(capsys.readouterr().out.split())
         assert "Candidates considered" in out
         assert result.split is not None
         assert result.split.candidate_model in out
-        assert "candidates considered" in out.lower()
-        assert "next-cheapest" in out
-        assert "--candidates to compare specific models" in out
+        assert f"{result.candidate_pool_size} in pool" in out
+        assert f"top {len(result.candidate_projections)} shown" in out
+        assert "Compare specific models with --candidates" in out
 
     def test_cap_caption_derives_count_from_candidate_pool_size(self) -> None:
         """The cap caption's pool count comes from candidate_pool_size, never hardcoded."""
@@ -245,7 +249,8 @@ class TestDefaultPoolBlockRendersOnEverySurface:
         assert "## Candidates considered" in md
         assert result.split is not None
         assert result.split.candidate_model in md
-        assert "next-cheapest" in md
+        assert f"{result.candidate_pool_size} in pool" in md
+        assert f"top {len(result.candidate_projections)} shown" in md
 
     def test_markdown_v2_renders_the_block(self, tmp_path: Path) -> None:
         result = _demo_result()
@@ -253,7 +258,7 @@ class TestDefaultPoolBlockRendersOnEverySurface:
         render_markdown_v2(result, out_path)
         md = out_path.read_text(encoding="utf-8")
         assert "## Candidates considered" in md
-        assert "next-cheapest" in md
+        assert f"{result.candidate_pool_size} in pool" in md
 
     def test_html_v1_renders_the_block(self, tmp_path: Path) -> None:
         result = _demo_result()
@@ -263,7 +268,7 @@ class TestDefaultPoolBlockRendersOnEverySurface:
         assert "candidates-considered" in html
         assert result.split is not None
         assert result.split.candidate_model in html
-        assert "next-cheapest" in html
+        assert f"{result.candidate_pool_size} in pool" in html
 
     def test_html_v2_renders_the_block(self, tmp_path: Path) -> None:
         result = _demo_result()
@@ -271,18 +276,19 @@ class TestDefaultPoolBlockRendersOnEverySurface:
         render_html_v2(result, out_path)
         html = out_path.read_text(encoding="utf-8")
         assert "candidates-considered" in html
-        assert "next-cheapest" in html
+        assert f"{result.candidate_pool_size} in pool" in html
 
-    def test_md_lines_helper_includes_cap_caption(self) -> None:
+    def test_md_lines_helper_includes_legend(self) -> None:
         result = _demo_result()
         lines = _candidates_considered_md_lines(result)
         joined = "\n".join(lines)
-        assert "next-cheapest" in joined
+        assert "Compare specific models with --candidates" in joined
 
-    def test_html_helper_includes_cap_caption(self) -> None:
+    def test_html_helper_includes_legend(self) -> None:
         result = _demo_result()
         html = _candidates_considered_html(result, lambda s: s)
-        assert "next-cheapest" in html
+        assert "Compare specific models with --candidates" in html
+        assert "candidates-legend" in html
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +307,8 @@ class TestDefaultPoolBlockViaCLI:
         assert result.exit_code == 0, result.output
         flat = " ".join(result.output.split())
         assert "Candidates considered" in flat
-        assert "next-cheapest" in flat
+        assert "in pool" in flat
+        assert "shown" in flat
         # The existing pool-source notice stays, verbatim, alongside the new block.
         assert "Recommendations use a curated set" in flat
 
@@ -333,7 +340,7 @@ class TestDefaultPoolBlockViaCLI:
         assert result.exit_code == 0, result.output
         flat = " ".join(result.output.split())
         assert "Candidates considered" in flat
-        assert "next-cheapest" in flat
+        assert "in pool" in flat
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +383,14 @@ class TestExplicitCandidatesPathUnchanged:
         render_terminal(result)
         out = " ".join(capsys.readouterr().out.split())
         assert "next-cheapest" not in out
+        # The default-pool "in pool / N shown" header counting never leaks
+        # onto the explicit --candidates path — that header stays plain
+        # ("Candidates considered", no trailing "· N in pool · top M shown").
+        # "shown" alone is too broad a needle (the unchanged caption prose
+        # legitimately contains "...precision shown..."), so check the header
+        # phrase specifically.
+        assert "in pool" not in out
+        assert "top " not in out.split("Candidates considered", 1)[1][:10]
 
 
 # ---------------------------------------------------------------------------

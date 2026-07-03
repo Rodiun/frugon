@@ -234,34 +234,167 @@ def compute_split(
     *candidate_price*; hard calls keep their existing baseline cost.  The blended
     cost is routed_cost + kept_cost.  All arithmetic is exact Decimal.
     """
-    routed_count = 0
-    kept_count = 0
-    routed_cost = _ZERO
-    kept_cost = _ZERO
+    partition = partition_by_difficulty(baseline_call_costs, threshold)
+    return _split_from_partition(
+        baseline_model=baseline_model,
+        candidate_model=candidate_model,
+        partition=partition,
+        candidate_price=candidate_price,
+        threshold=threshold,
+        window_days=window_days,
+        observed_span_days=observed_span_days,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Candidate-independent partition (the perf fast path for multi-candidate runs)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DifficultyPartition:
+    """The easy/hard split of a baseline model's calls, computed ONCE.
+
+    The difficulty classification (:func:`is_easy`) depends only on a call's
+    own shape (prompt/completion length, turn depth) and the *threshold* — it
+    is entirely independent of which candidate model might receive the easy
+    calls.  When a caller is evaluating MANY candidates against the same
+    baseline call set (the "Candidates considered" block: up to 23 built-in
+    candidates, or an explicit ``--candidates`` list), re-running
+    :func:`is_easy` once per candidate repeats the identical Decimal-heavy
+    computation for no reason — on the bundled 56,100-record demo this alone
+    cost ~4s of wall time across the 22-candidate default pool.
+
+    This partition is computed once and reused for every candidate: each
+    candidate's :class:`SplitRouting` is then derived by pricing ONLY the
+    already-classified easy subset at that candidate's rate (an O(easy_count)
+    pass per candidate, with no difficulty re-classification) and reusing the
+    precomputed hard-subset aggregate (an O(1) lookup).  The final per-call
+    "route only if actually cheaper for THIS call" gate (§6 never-inflate)
+    still runs per (candidate, easy-call) pair — that check is genuinely
+    candidate-dependent (a call's own prompt/completion mix can favour a
+    cheap-input/expensive-output candidate differently than a cheap-output
+    one) and cannot be reduced to aggregates without changing which calls get
+    routed, so ranking/selection semantics are byte-for-byte unchanged from
+    the pre-optimization implementation.
+    """
+
+    threshold: Decimal
+    easy_calls: list[CallCost]
+    hard_count: int
+    hard_cost: Decimal  # sum of total_cost over hard (kept) calls — candidate-independent
+    baseline_cost: Decimal  # sum of total_cost over ALL calls (easy + hard)
+
+
+def partition_by_difficulty(
+    baseline_call_costs: list[CallCost],
+    threshold: Decimal = EASY_THRESHOLD,
+) -> DifficultyPartition:
+    """Classify *baseline_call_costs* into easy/hard exactly once.
+
+    Equivalent to calling :func:`is_easy` on every record in
+    ``baseline_call_costs`` — same threshold, same per-record semantics — but
+    done a single time regardless of how many candidates are later evaluated
+    against the result via :func:`compute_split_from_partition`.
+    """
+    hard_count = 0
+    hard_cost = _ZERO
     baseline_cost = _ZERO
+    easy_calls: list[CallCost] = []
 
     for cc in baseline_call_costs:
         baseline_cost += cc.total_cost
-        routed = False
         if is_easy(cc.record, threshold):
-            candidate_call_cost = candidate_price.input_cost_per_token * Decimal(
-                cc.record.prompt_tokens
-            ) + candidate_price.output_cost_per_token * Decimal(cc.record.completion_tokens)
-            # Route an easy call ONLY when the candidate is actually cheaper for
-            # THIS call.  select_easy_target compares on a blended 50/50 per-token
-            # average, which does not guarantee the candidate is cheaper on the
-            # output axis — a completion-heavy easy call could otherwise reprice
-            # *higher* than baseline.  This per-call check makes blended_cost <=
-            # baseline_cost hold unconditionally: routing never inflates a call
-            # (§6 never-inflate), even with an adversarial user --candidates pool.
-            if candidate_call_cost < cc.total_cost:
-                routed_count += 1
-                routed_cost += candidate_call_cost
-                routed = True
-        if not routed:
-            kept_count += 1
-            kept_cost += cc.total_cost
+            easy_calls.append(cc)
+        else:
+            hard_count += 1
+            hard_cost += cc.total_cost
 
+    return DifficultyPartition(
+        threshold=threshold,
+        easy_calls=easy_calls,
+        hard_count=hard_count,
+        hard_cost=hard_cost,
+        baseline_cost=baseline_cost,
+    )
+
+
+def compute_split_from_partition(
+    *,
+    baseline_model: str,
+    candidate_model: str,
+    partition: DifficultyPartition,
+    candidate_price: ModelPrice,
+    window_days: int | None = None,
+    observed_span_days: float | None = None,
+) -> SplitRouting:
+    """Build a SplitRouting for *candidate_model* from a precomputed partition.
+
+    Reuses the candidate-independent easy/hard classification in *partition*
+    (see :func:`partition_by_difficulty`) instead of re-running :func:`is_easy`
+    for every call.  Only the easy subset is repriced at *candidate_price* —
+    an O(easy_count) pass, versus the O(all_count) classification the naive
+    per-candidate loop repeated every time — and the per-call "route only if
+    actually cheaper for THIS call" gate is preserved unchanged (§6
+    never-inflate), so the resulting :class:`SplitRouting` is numerically
+    IDENTICAL, call for call, to what :func:`compute_split` would return for
+    the same baseline call set and candidate — proven by
+    ``test_partition_equivalence`` (exact match on the bundled demo and on a
+    randomized property fixture) before this path is used anywhere.
+    """
+    return _split_from_partition(
+        baseline_model=baseline_model,
+        candidate_model=candidate_model,
+        partition=partition,
+        candidate_price=candidate_price,
+        threshold=partition.threshold,
+        window_days=window_days,
+        observed_span_days=observed_span_days,
+    )
+
+
+def _split_from_partition(
+    *,
+    baseline_model: str,
+    candidate_model: str,
+    partition: DifficultyPartition,
+    candidate_price: ModelPrice,
+    threshold: Decimal,
+    window_days: int | None,
+    observed_span_days: float | None,
+) -> SplitRouting:
+    """Shared arithmetic core for both :func:`compute_split` and the
+    partition-reusing fast path — one function, so the two entry points can
+    never drift onto different arithmetic."""
+    routed_count = 0
+    routed_cost = _ZERO
+    # Easy calls this candidate does NOT actually beat on a per-call basis stay
+    # on the baseline — accumulated alongside the precomputed hard bucket so
+    # every easy call is accounted exactly once (routed XOR kept).
+    not_routed_easy_count = 0
+    not_routed_easy_cost = _ZERO
+
+    for cc in partition.easy_calls:
+        candidate_call_cost = candidate_price.input_cost_per_token * Decimal(
+            cc.record.prompt_tokens
+        ) + candidate_price.output_cost_per_token * Decimal(cc.record.completion_tokens)
+        # Route an easy call ONLY when the candidate is actually cheaper for
+        # THIS call.  select_easy_target compares on a blended 50/50 per-token
+        # average, which does not guarantee the candidate is cheaper on the
+        # output axis — a completion-heavy easy call could otherwise reprice
+        # *higher* than baseline.  This per-call check makes blended_cost <=
+        # baseline_cost hold unconditionally: routing never inflates a call
+        # (§6 never-inflate), even with an adversarial user --candidates pool.
+        if candidate_call_cost < cc.total_cost:
+            routed_count += 1
+            routed_cost += candidate_call_cost
+        else:
+            not_routed_easy_count += 1
+            not_routed_easy_cost += cc.total_cost
+
+    kept_count = partition.hard_count + not_routed_easy_count
+    kept_cost = partition.hard_cost + not_routed_easy_cost
+    baseline_cost = partition.baseline_cost
     blended_cost = routed_cost + kept_cost
 
     return SplitRouting(

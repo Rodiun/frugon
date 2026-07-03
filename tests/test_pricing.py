@@ -391,6 +391,219 @@ class TestPricingCache:
         clear_pricing_cache()
 
 
+class TestPinnedPricingIdentity:
+    """Contract tests for ``pinned_pricing_identity`` (FRG-OSS-038 perf fix).
+
+    ``get_model_price`` normally stats the pricing file's identity on every
+    call via ``_override_cache_key()`` — correct, but costly when a hot loop
+    calls it tens of thousands of times in a row (see the module's own
+    "Pinned cache-key batching" docstring for the ~14s profiling finding that
+    motivated this).  ``pinned_pricing_identity()`` lets a batch caller opt
+    into computing that stat ONCE and reusing it for the whole block.
+
+    This is a new public API on the most correctness-critical module in the
+    codebase (§2a cost-math carve-out), so it gets its own explicit contract
+    tests rather than relying on incidental coverage from
+    ``analyze_records``'s hot-path usage:
+
+      1. The pin stats once and reuses the key for every call inside the block.
+      2. Nested (reentrant) pins are safe: the inner pin reuses the outer's
+         key without re-stating; exiting the inner pin does not clear the
+         outer pin; only exiting the OUTERMOST pin fully clears it.
+      3. An exception raised inside a pinned block still restores state — the
+         pin is unwound (back to unpinned) even on a raised exception.
+      4. Outside any pin, the existing mid-process mtime-invalidation
+         guarantee is untouched: a rewritten pricing file IS observed on the
+         very next call — the explicit counterpoint proving the pin is
+         opt-in, never a change to the unpinned default behaviour.
+    """
+
+    def test_pin_stats_once_and_reuses_the_key_for_the_whole_block(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Arrange: count calls to the underlying unconditional stat helper.
+        Act: call _override_cache_key() many times inside one pin.
+        Assert: the underlying stat helper ran exactly once; every call
+        inside the block returned that SAME key.
+        """
+        import frugon.pricing as pricing_module
+        from frugon.pricing import _override_cache_key, pinned_pricing_identity
+
+        calls = {"n": 0}
+        real_compute = pricing_module._compute_cache_key
+
+        def _counting_compute() -> tuple[str, str, int, int]:
+            calls["n"] += 1
+            return real_compute()
+
+        monkeypatch.setattr(pricing_module, "_compute_cache_key", _counting_compute)
+
+        with pinned_pricing_identity():
+            first = _override_cache_key()
+            for _ in range(50):
+                again = _override_cache_key()
+                assert again == first
+
+        assert calls["n"] == 1, (
+            f"expected the pin to stat exactly once for the whole block, got {calls['n']}"
+        )
+
+    def test_nested_pins_reuse_outer_key_and_only_outermost_exit_clears(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Arrange: count calls to the underlying stat helper.
+        Act: enter an outer pin, capture its key, enter a nested inner pin,
+        capture ITS key, exit the inner pin, capture the key again, exit the
+        outer pin.
+        Assert: (a) the inner pin's key equals the outer's (reused, not
+        re-stated — only 1 stat total across both); (b) after the inner pin
+        exits, the key is STILL the outer's (not cleared); (c) after the
+        outer pin exits, the pin is fully cleared (a fresh call re-stats).
+        """
+        import frugon.pricing as pricing_module
+        from frugon.pricing import _override_cache_key, pinned_pricing_identity
+
+        calls = {"n": 0}
+        real_compute = pricing_module._compute_cache_key
+
+        def _counting_compute() -> tuple[str, str, int, int]:
+            calls["n"] += 1
+            return real_compute()
+
+        monkeypatch.setattr(pricing_module, "_compute_cache_key", _counting_compute)
+
+        with pinned_pricing_identity():
+            outer_key = _override_cache_key()
+            with pinned_pricing_identity():
+                inner_key = _override_cache_key()
+                assert inner_key == outer_key, (
+                    "a nested pin must reuse the outer pin's key, not re-stat"
+                )
+            # Inner pin has exited; the outer pin must still be active.
+            after_inner_exit = _override_cache_key()
+            assert after_inner_exit == outer_key, (
+                "exiting the INNER pin must not clear the OUTER pin's key"
+            )
+
+        assert calls["n"] == 1, (
+            f"expected exactly one stat across both nested pins, got {calls['n']}"
+        )
+
+        # Outermost pin has now exited — the pin is fully cleared, so the
+        # next call re-stats (a fresh, unpinned lookup).
+        _override_cache_key()
+        assert calls["n"] == 2, (
+            "after the OUTERMOST pin exits, the pin must be fully cleared so "
+            "the next call re-stats"
+        )
+
+    def test_exception_inside_pinned_block_still_restores_state(self) -> None:
+        """Arrange: none.
+        Act: raise inside a pinned block.
+        Assert: the pin is unwound (back to None / unpinned) even though the
+        block exited via an exception, not a normal return.
+        """
+        import frugon.pricing as pricing_module
+        from frugon.pricing import pinned_pricing_identity
+
+        assert pricing_module._pinned_cache_key_var.get() is None, (
+            "precondition: no pin active before this test"
+        )
+
+        pin_was_active_before_raise = False
+
+        def _raise_inside_pin() -> None:
+            nonlocal pin_was_active_before_raise
+            with pinned_pricing_identity():
+                pin_was_active_before_raise = (
+                    pricing_module._pinned_cache_key_var.get() is not None
+                )
+                raise ValueError("boom")
+
+        with pytest.raises(ValueError, match="boom"):
+            _raise_inside_pin()
+
+        assert pin_was_active_before_raise, (
+            "precondition: the pin must actually be active before the "
+            "exception fires, or this test proves nothing about restoration"
+        )
+        assert pricing_module._pinned_cache_key_var.get() is None, (
+            "a raised exception inside the pinned block must still restore "
+            "the pin to unpinned — the context manager must not leak pinned "
+            "state across an exceptional exit"
+        )
+
+    def test_unpinned_calls_still_observe_a_mid_process_rewrite(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Arrange: point pricing at a writable file, resolve a model — OUTSIDE
+        any pin, exactly as :func:`test_pricing_update_invalidates_cache_via_mtime`
+        does.
+        Act: rewrite the file with a different price, resolve again — still
+        with no pin active anywhere.
+        Assert: the new price is returned — proving the pin is OPT-IN: with no
+        pin engaged, unpinned callers keep the existing live mid-process
+        mtime-invalidation guarantee unchanged, byte-for-byte the same
+        behaviour as before this feature existed.
+        """
+        import json
+        import os
+        import time
+
+        import frugon.pricing as pricing_module
+        from frugon.pricing import clear_pricing_cache, get_model_price
+
+        pricing_file = tmp_path / "pinned-counterpoint-pricing.json"
+        pricing_file.write_text(
+            json.dumps(
+                {
+                    "_last_synced": "2026-01-01",
+                    "pin-counterpoint-model": {
+                        "input_cost_per_token": 0.000001,
+                        "output_cost_per_token": 0.000002,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(pricing_module, "_PRICING_JSON", pricing_file)
+        monkeypatch.setattr(pricing_module, "_BUNDLED_SEED_PATH", pricing_file)
+        clear_pricing_cache()
+
+        assert pricing_module._pinned_cache_key_var.get() is None, (
+            "precondition: no pin active — this test proves the UNPINNED path"
+        )
+
+        first = get_model_price("pin-counterpoint-model")
+        assert first is not None
+        assert first.input_cost_per_token == Decimal("0.000001")
+
+        time.sleep(0.01)
+        pricing_file.write_text(
+            json.dumps(
+                {
+                    "_last_synced": "2026-02-02",
+                    "pin-counterpoint-model": {
+                        "input_cost_per_token": 0.000009,
+                        "output_cost_per_token": 0.000008,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        future = time.time() + 5
+        os.utime(pricing_file, (future, future))
+
+        second = get_model_price("pin-counterpoint-model")
+        assert second is not None
+        assert second.input_cost_per_token == Decimal("0.000009"), (
+            "outside any pin, a rewritten pricing.json must STILL invalidate "
+            "the cache via mtime/size — the pin changes nothing for the "
+            "default, unpinned call path"
+        )
+        clear_pricing_cache()
+
+
 class TestPricingFetchUserAgent:
     """The registry fetch must send an identifying User-Agent — some hosts reject
     the default ``Python-urllib`` agent (the same gap broke the quality refresh)."""

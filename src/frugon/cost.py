@@ -31,6 +31,7 @@ except ImportError as exc:  # pragma: no cover
     raise ImportError("tokencost is required. pip install tokencost") from exc
 
 from frugon.pricing import ModelPrice, get_model_price
+from frugon.pricing import pinned_pricing_identity as _pinned_pricing_identity
 
 if TYPE_CHECKING:  # pragma: no cover — typing only, avoids a cost<->routing cycle
     from frugon.routing import SplitRouting
@@ -998,13 +999,19 @@ def analyze_records(
                            free, so non-interactive callers pay nothing.
     """
     total_records = len(records)
-    if progress_cb is None:
-        call_costs = [compute_call_cost(r) for r in records]
-    else:
-        call_costs = []
-        for index, r in enumerate(records, start=1):
-            call_costs.append(compute_call_cost(r))
-            progress_cb(index, total_records)
+    # Pin the pricing-table identity (one stat instead of one per record) for
+    # this pass — see frugon.pricing.pinned_pricing_identity for why this is
+    # safe: nothing within a single ``analyze`` invocation rewrites the
+    # pricing file mid-pass, only a separate ``frugon pricing update`` process
+    # does, and that always precedes (never overlaps) an analysis run.
+    with _pinned_pricing_identity():
+        if progress_cb is None:
+            call_costs = [compute_call_cost(r) for r in records]
+        else:
+            call_costs = []
+            for index, r in enumerate(records, start=1):
+                call_costs.append(compute_call_cost(r))
+                progress_cb(index, total_records)
     priced = [cc for cc in call_costs if cc.price is not None]
     unpriced = [cc for cc in call_costs if cc.price is None]
 
@@ -1090,7 +1097,8 @@ def analyze_records(
     unrated_beats_baseline: list[str] = []
     if candidates:
         from frugon.pricing import get_model_price as _gmp
-        from frugon.routing import compute_split as _compute_split
+        from frugon.routing import compute_split_from_partition as _compute_split
+        from frugon.routing import partition_by_difficulty as _partition_by_difficulty
 
         # The dominant baseline model's own calls — the only routable set (the
         # easy subset moves to the candidate, the hard subset stays on the
@@ -1098,6 +1106,20 @@ def analyze_records(
         # SAME call set the headline split uses, so reusing it keeps the basis
         # identical between selection, headline, and block.
         baseline_call_costs = [cc for cc in priced if cc.record.model == dominant_model]
+
+        # Candidate-independent work, done ONCE regardless of how many
+        # candidates follow (see frugon.routing.DifficultyPartition +
+        # partition_by_difficulty docstrings for why this is safe and
+        # numerically identical to re-classifying per candidate):
+        #   (a) the easy/hard difficulty partition of the baseline's own calls
+        #   (b) the full-dataset token sums, so each candidate's full-SWAP
+        #       "Upper bound" total is an O(1) multiply instead of an
+        #       O(all priced calls) re-walk.
+        _difficulty_partition = _partition_by_difficulty(baseline_call_costs)
+        _total_prompt_tokens = sum((cc.record.prompt_tokens for cc in priced), 0)
+        _total_completion_tokens = sum(
+            (cc.record.completion_tokens for cc in priced), 0
+        )
 
         for cand in candidates:
             if cand == dominant_model:
@@ -1112,15 +1134,13 @@ def analyze_records(
             # (a) Full-SWAP total — every call repriced at the candidate.  Retained
             # only for the aggressive "Upper bound" line; it never drives the
             # headline routing target or any candidate-block row (those are
-            # split-only now).
-            cand_total = Decimal("0")
-            for cc in priced:
-                cand_total += cand_price.input_cost_per_token * Decimal(
-                    cc.record.prompt_tokens
-                )
-                cand_total += cand_price.output_cost_per_token * Decimal(
-                    cc.record.completion_tokens
-                )
+            # split-only now).  Derived from the dataset-wide token sums above
+            # (candidate-independent aggregates) rather than re-summing every
+            # priced call per candidate — identical arithmetic, O(1) per candidate.
+            cand_total = (
+                cand_price.input_cost_per_token * Decimal(_total_prompt_tokens)
+                + cand_price.output_cost_per_token * Decimal(_total_completion_tokens)
+            )
             cand_observed_totals[cand] = cand_total
 
             # (b) Full-DATASET split New-spend — the quality-preserving quantity
@@ -1129,11 +1149,12 @@ def analyze_records(
             # cheaper-model calls untouched, measured over the WHOLE analyzed
             # dataset.  This is exactly what the headline panel's New-spend
             # represents for the chosen candidate, so selecting on it guarantees
-            # the headline and the block agree.
+            # the headline and the block agree.  Reuses the precomputed
+            # difficulty partition instead of re-classifying every baseline call.
             cand_split = _compute_split(
                 baseline_model=dominant_model,
                 candidate_model=cand,
-                baseline_call_costs=baseline_call_costs,
+                partition=_difficulty_partition,
                 candidate_price=cand_price,
                 window_days=window_days,
                 observed_span_days=observed_span,
@@ -1221,11 +1242,22 @@ def analyze_records(
         # above, because a wholesale swap moves EVERY call and so needs the
         # tighter tier-drop cap that only applies to a full swap.
         from frugon.pricing import get_model_price as _gmp_default
-        from frugon.routing import compute_split as _compute_split_default
+        from frugon.routing import (
+            compute_split_from_partition as _compute_split_default,
+        )
+        from frugon.routing import partition_by_difficulty as _partition_by_difficulty_default
 
         baseline_call_costs_default = [
             cc for cc in priced if cc.record.model == dominant_model
         ]
+        # Candidate-independent difficulty classification, computed ONCE for
+        # the whole built-in pool instead of once per candidate — see
+        # frugon.routing.DifficultyPartition.  On the bundled 56,100-record
+        # demo (23-candidate default pool) this closes the ~4s of redundant
+        # Decimal difficulty-scoring that dominated the post-pricing pass.
+        _difficulty_partition_default = _partition_by_difficulty_default(
+            baseline_call_costs_default
+        )
         for cand in _ROUTING_CANDIDATES:
             if cand == dominant_model:
                 continue
@@ -1235,7 +1267,7 @@ def analyze_records(
             cand_split = _compute_split_default(
                 baseline_model=dominant_model,
                 candidate_model=cand,
-                baseline_call_costs=baseline_call_costs_default,
+                partition=_difficulty_partition_default,
                 candidate_price=cand_price,
                 window_days=window_days,
                 observed_span_days=observed_span,

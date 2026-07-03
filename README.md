@@ -13,7 +13,7 @@ and see — on your machine — how much you'd save by switching or routing mode
 
 > **Your data never leaves your machine. Your keys go straight to your own providers. Nothing reaches us.**
 
-![Frugon analyzing a log file and recommending a routing split](assets/demo.gif)
+![Frugon analyzing a log file and recommending a routing split](https://raw.githubusercontent.com/Rodiun/frugon/main/assets/demo.gif)
 
 ## Install & run
 
@@ -128,14 +128,15 @@ $ frugon analyze --demo --candidates claude-sonnet-4-5,gpt-4.1,claude-haiku-4-5,
 └─────────────────────────────────────────────────────────────────────────────┘
                                                                                
   Candidates considered                                                        
-  claude-sonnet-4-5  $452.23 / mo  17.7% lower  considered                     
-  gpt-4.1            $405.89 / mo  26.1% lower  considered                     
-  claude-haiku-4-5   $377.82 / mo  31.2% lower  considered                     
-  gemini-2.5-flash   $356.35 / mo  35.1% lower  considered                     
-  deepseek-v4-flash  $343.91 / mo  37.4% lower  recommended                    
+  claude-sonnet-4-5  $452.23 / mo  17.7% lower  Strong   considered            
+  gpt-4.1            $405.89 / mo  26.1% lower  Capable  considered            
+  claude-haiku-4-5   $377.82 / mo  31.2% lower  Capable  considered            
+  gemini-2.5-flash   $356.35 / mo  35.1% lower  Strong   considered            
+  deepseek-v4-flash  $343.91 / mo  37.4% lower  Strong   recommended           
   Each candidate is shown under the same quality-preserving split (easy calls  
-  to the candidate, hard calls kept on baseline); the cheapest split is the    
-  headline recommendation. Run --measure --judge to score each candidate's     
+  to the candidate, hard calls kept on baseline); the biggest saving is the    
+  headline recommendation, and when savings tie at the precision shown the    
+  higher quality tier wins. Run --measure --judge to score each candidate's    
   quality.                                                                     
 
   Accounting   36,100 routed + 10,000 kept (gpt-5.5) + 10,000 already on 

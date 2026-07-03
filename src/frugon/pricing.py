@@ -35,6 +35,7 @@ import functools
 import json
 import re
 import urllib.error
+from contextvars import ContextVar, Token
 from datetime import date as _date
 from decimal import Decimal
 from pathlib import Path
@@ -138,6 +139,46 @@ _CacheKey = tuple[str, str, int, int]  # (override_path, seed_path, mtime_ns, si
 # common case is one dict lookup and zero disk access after the first call.
 _override_cache: dict[_CacheKey, _OverrideTable] = {}
 
+# ---------------------------------------------------------------------------
+# Pinned cache-key batching
+# ---------------------------------------------------------------------------
+#
+# ``_override_cache_key()`` stats the pricing file (and, when absent, the
+# bundled seed) on every call so a rewritten file is detected immediately —
+# see ``test_pricing_update_invalidates_cache_via_mtime``.  That guarantee is
+# correct and cheap for the CLI's normal call pattern (a handful of distinct
+# models resolved through ``get_model_price``), but a large-log cost pass
+# calls ``get_model_price`` once per RECORD (tens of thousands of times) even
+# though the file cannot possibly change mid-pass — no code path in a single
+# ``frugon analyze`` invocation writes pricing.json while the analysis is
+# running.  Profiling a 56,100-record log showed ~14s spent almost entirely in
+# repeated ``Path.stat()`` calls here, dwarfing the actual pricing arithmetic.
+#
+# ``pinned_pricing_identity()`` lets a batch caller opt into computing the
+# stat ONCE and reusing it for the whole batch, while every other call site
+# (measure.py, routing.py's one-off lookups, and any code that does not
+# explicitly pin) keeps the existing per-call stat and its live mid-process
+# invalidation guarantee unchanged.  Reentrant-safe (nested pins reuse the
+# outermost pin's value) so a pinned batch may safely call into helpers that
+# also pin.
+#
+# Backed by a ``ContextVar`` rather than a bare module global (PD-directed
+# 2026-07-03, P3-b): a module global is shared, unscoped, mutable state — safe
+# today because frugon's analysis pass is single-threaded, but a future
+# parallel-analyze (multiple hot loops pinning concurrently, e.g. per-thread
+# or per-async-task batches) would silently race on a bare global, with one
+# task's pin leaking into another's.  ``ContextVar`` gives each execution
+# context (thread, or asyncio task via automatic context copy) its own
+# independent pin, so this is closed while the API is still fresh rather than
+# left as a future landmine.  The set/reset token is the exact save/restore
+# shape the previous save/restore-a-plain-variable implementation already
+# used, so this is a drop-in swap: same semantics, same test contract (see
+# ``TestPinnedPricingIdentity`` in tests/test_pricing.py), safer under
+# concurrency.
+_pinned_cache_key_var: ContextVar[_CacheKey | None] = ContextVar(
+    "_pinned_cache_key", default=None
+)
+
 
 def _override_cache_key() -> _CacheKey:
     """Build a cache key from the resolved pricing path's identity + stat.
@@ -146,7 +187,19 @@ def _override_cache_key() -> _CacheKey:
     ``load_json_or_empty`` would actually read (user-dir file if present, else
     bundled seed) by its ``(mtime_ns, size)``.  A missing file stats as
     ``(0, 0)`` so the absent/error case is itself cacheable and stable.
+
+    When called inside a :func:`pinned_pricing_identity` block, returns the
+    pin's already-computed key instead of stat-ing again — see that function's
+    docstring for why this is safe.
     """
+    pinned = _pinned_cache_key_var.get()
+    if pinned is not None:
+        return pinned
+    return _compute_cache_key()
+
+
+def _compute_cache_key() -> _CacheKey:
+    """Unconditionally stat and build a fresh cache key (no pin short-circuit)."""
     if _PRICING_JSON.exists():
         read_path = _PRICING_JSON
     elif _BUNDLED_SEED_PATH.exists():
@@ -159,6 +212,38 @@ def _override_cache_key() -> _CacheKey:
     except OSError:
         stat_part = (0, 0)
     return (str(_PRICING_JSON), str(_BUNDLED_SEED_PATH), stat_part[0], stat_part[1])
+
+
+class pinned_pricing_identity:
+    """Context manager: stat the pricing file identity ONCE for the block.
+
+    Use around a hot loop that calls :func:`get_model_price` many times in
+    quick succession (e.g. pricing every record in a large log) when nothing
+    in that loop can rewrite the pricing file out from under it — the only
+    writer is ``frugon pricing update``, a separate CLI invocation, so within
+    one ``analyze`` process no in-flight loop ever needs to observe a mid-loop
+    rewrite.
+
+    Outside any pin (the default for every existing call site — measure.py,
+    routing.py, tests), :func:`_override_cache_key` stats on every call,
+    preserving the exact mid-process-invalidation behaviour
+    ``test_pricing_update_invalidates_cache_via_mtime`` locks in.  Nested pins
+    are safe: an inner pin reuses the outer pin's key rather than re-stating.
+
+    Backed by :data:`_pinned_cache_key_var` (a ``ContextVar``), so concurrent
+    execution contexts (threads, or asyncio tasks) each see their own pin
+    state rather than racing on shared mutable module state.
+    """
+
+    _token: Token[_CacheKey | None]
+
+    def __enter__(self) -> None:
+        outer = _pinned_cache_key_var.get()
+        value = outer if outer is not None else _compute_cache_key()
+        self._token = _pinned_cache_key_var.set(value)
+
+    def __exit__(self, *exc_info: object) -> None:
+        _pinned_cache_key_var.reset(self._token)
 
 
 def clear_pricing_cache() -> None:
@@ -175,6 +260,7 @@ def clear_pricing_cache() -> None:
     _resolve_model_price.cache_clear()
     _canonical_tc_index = None
     _canonical_tc_token = None
+    _pinned_cache_key_var.set(None)
 
 
 def load_pricing_override() -> _OverrideTable:
