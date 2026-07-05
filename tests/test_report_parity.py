@@ -218,7 +218,28 @@ class TestStalenessParity:
         assert "<code>frugon quality update</code>" in text
 
     def test_fresh_dates_carry_no_caution(self, tmp_path: Path) -> None:
-        text = _html(render_html, _split_result(), tmp_path)  # 2026-06-04 dates
+        """A recent sync renders no staleness caution.
+
+        Clock-relative by construction (mirrors test_report_split.py's
+        test_split_fresh_dates_carry_no_amber_annotation and
+        test_report_wholesale.py's test_fresh_rows_carry_no_annotation): the
+        fixture's hardcoded "2026-06-04" default eventually ages past the
+        30/60-day staleness windows and this test would start asserting the
+        OPPOSITE of what "fresh" means. Overriding both dates to 5 days before
+        whatever "today" actually is asserts the boundary behaviour (fresh ->
+        no caution) forever, not a calendar moment.
+        """
+        from datetime import date, timedelta
+
+        recent = (date.today() - timedelta(days=5)).isoformat()
+        text = _html(
+            render_html,
+            _split_result(
+                pricing_json_last_synced=recent,
+                quality_json_last_synced=recent,
+            ),
+            tmp_path,
+        )
         assert "days old" not in text
         assert "refresh with" not in text
 

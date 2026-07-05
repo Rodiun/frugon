@@ -120,6 +120,47 @@ def test_disabled_reporter_bar_advance_is_noop_but_callable() -> None:
         task.advance(1)  # must not raise even with total=0
 
 
+def test_disabled_reporter_bar_relabel_is_noop_but_callable() -> None:
+    """A disabled bar's relabel() is a safe no-op — no console to update."""
+    reporter = ProgressReporter(enabled=False)
+    with reporter.bar("Pricing", total=0) as task:
+        task.relabel("Comparing 23 candidates…")  # must not raise
+
+
+def test_rich_progress_task_relabel_changes_description() -> None:
+    """FRG-OSS-039: _RichProgressTask.relabel() updates the Rich task's description.
+
+    Used by the CLI to rename the still-open pricing bar to
+    "Comparing N candidates…" once the per-record pricing phase completes but
+    candidate comparison (an uncounted phase) is still running underneath.
+    """
+    from rich.console import Console
+    from rich.progress import Progress, TextColumn
+
+    from frugon._progress import _RichProgressTask
+
+    progress = Progress(TextColumn("{task.description}"), console=Console(stderr=True))
+    task_id = progress.add_task("Pricing", total=3)
+    task = _RichProgressTask(progress, task_id)
+    task.advance(3)
+    assert progress.tasks[0].description == "Pricing"
+    task.relabel("Comparing 23 candidates…")
+    assert progress.tasks[0].description == "Comparing 23 candidates…"
+
+
+def test_enabled_reporter_bar_relabel_writes_only_to_stderr(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """relabel(), like the rest of the bar chrome, never touches stdout."""
+    reporter = ProgressReporter(enabled=True)
+    with reporter.bar("Pricing", total=3) as task:
+        for _ in range(3):
+            task.advance(1)
+        task.relabel("Comparing 23 candidates…")
+    captured = capsys.readouterr()
+    assert captured.out == "", f"relabel leaked to stdout: {captured.out!r}"
+
+
 def test_progress_reporter_context_manager_gates_via_isatty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

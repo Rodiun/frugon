@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pathlib
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -90,8 +90,36 @@ def test_analyze_demo_under_nontty_runner_has_no_progress_chrome() -> None:
     result = runner.invoke(app, ["analyze", "--demo"], catch_exceptions=False)
     assert result.exit_code == 0, f"exited {result.exit_code}: {result.output}"
     assert "cost analysis" in result.output
-    for chrome in ("Reading logs", "Pricing  ", "Priced in"):
+    for chrome in ("Reading logs", "Pricing  ", "Priced in", "Compared", "Comparing"):
         assert chrome not in result.output, f"progress chrome leaked: {chrome!r}"
+
+
+def test_analyze_demo_progress_enabled_shows_compared_checkpoint_with_elapsed() -> None:
+    """FRG-OSS-039: with progress chrome force-enabled, the checkpoint trail
+
+    includes a "Compared N candidates in X.Xs" line — the comparison phase's
+    own genuinely-attributable elapsed time, distinct from the "Priced in
+    X.Xs" line that covers the whole analyze_records() call.
+
+    ``sys.stderr.isatty`` cannot be patched directly here: Click's CliRunner
+    (8.2+) replaces ``sys.stderr`` with its own captured stream INSIDE
+    ``invoke()``, after any pre-invoke patch of the old stream's ``isatty``
+    would take effect. Patching the gate function itself
+    (``frugon._progress.progress_enabled``) exercises the exact same
+    downstream code path (the reporter is constructed with ``enabled=True``)
+    without fighting that stream-replacement timing.
+    """
+    with patch("frugon._progress.progress_enabled", return_value=True):
+        result = runner.invoke(app, ["analyze", "--demo"], catch_exceptions=False)
+    assert result.exit_code == 0, f"exited {result.exit_code}: {result.output}"
+    assert "Priced in" in result.output
+    lines = [line for line in result.output.splitlines() if "Compared" in line]
+    assert len(lines) == 1, f"expected exactly one Compared line, got {lines!r}"
+    import re
+
+    match = re.search(r"Compared (\d+) candidates in (\d+\.\d)s", lines[0])
+    assert match is not None, f"Compared line did not match expected shape: {lines[0]!r}"
+    assert int(match.group(1)) > 1, f"candidate count should be >1: {lines[0]!r}"
 
 
 # ---------------------------------------------------------------------------

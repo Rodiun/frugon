@@ -590,6 +590,7 @@ _NEW_VENDOR_KEY_CASES = [
     ("qwen-max", "DASHSCOPE_API_KEY"),
     ("llama-4-maverick-17b-128e-instruct", "GROQ_API_KEY"),
     ("llama-4-scout-17b-16e-instruct", "GROQ_API_KEY"),
+    ("mistral-large-3", "MISTRAL_API_KEY"),
 ]
 
 
@@ -665,12 +666,24 @@ class TestNewVendorLiteLLMRouting:
             ("glm-4.5-air", "zai/"),
             ("minimax-m3", "minimax/"),
             ("qwen-max", "dashscope/"),
+            ("mistral-large-3", "mistral/"),
         ],
     )
     def test_route_for_measure_prepends_expected_prefix(
         self, bare: str, expected_prefix: str
     ) -> None:
         assert measure._route_for_measure(bare) == expected_prefix + bare
+
+    def test_route_for_measure_mistral_already_prefixed_not_double_routed(
+        self,
+    ) -> None:
+        """A caller-supplied "mistral/..." name (already routable) must pass
+
+        through unchanged — the "mistral-" bare-name prefix key must not
+        double-prefix a name that already carries the provider segment.
+        """
+        already_routed = "mistral/mistral-large-latest"
+        assert measure._route_for_measure(already_routed) == already_routed
 
     @pytest.mark.parametrize(
         "bare",
@@ -725,6 +738,7 @@ class TestNewVendorLiteLLMRouting:
         [
             ("deepseek-v3.2", "deepseek/"),
             ("grok-4", "xai/"),
+            ("mistral-large-3", "mistral/"),
         ],
     )
     def test_get_llm_provider_resolves_the_routed_form(

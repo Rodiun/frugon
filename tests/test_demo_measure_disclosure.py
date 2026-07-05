@@ -104,6 +104,12 @@ def test_demo_measure_confirmed_verdict_discloses_divergence_not_offline_phrase(
     assert "try-out sample model" in out
     assert "not the headline recommendation" in out
     assert "verifies the --measure flow, not the recommended switch" in out
+    # FRG-OSS-040(b): the why-clause explaining the demo pin is appended to the
+    # SAME sentence, not a separate line.
+    assert (
+        "the demo pins its sample model so the try-out needs only an OpenAI key"
+        in out
+    )
 
     # (b) no "verified your recommendation"-shaped claim: the offline-phrase
     # back-reference wording must NOT appear anywhere in this run's output.
@@ -213,3 +219,87 @@ def test_explicit_candidates_matching_recommendation_keeps_offline_backreference
     # offline-phrase back-reference still renders — no divergence note.
     assert "verified on your data" in out
     assert "try-out sample model" not in out
+
+
+# ---------------------------------------------------------------------------
+# FRG-OSS-040(a): the demo-pin disclosure line at measurement START
+# ---------------------------------------------------------------------------
+
+
+def test_demo_measure_shows_pin_disclosure_at_measurement_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--demo --measure (no explicit --candidates) prints a dim disclosure
+
+    naming the pinned model, derived from _DEMO_MEASURE_CANDIDATE, before
+    sampling begins — so the user knows why only OPENAI_API_KEY is needed
+    for the try-out instead of discovering it after the fact.
+    """
+    _patch_measure_engine(monkeypatch)
+    sentinel = _fake_confirmed_measure_result()
+    monkeypatch.setattr(measure, "run_measure", lambda *_a, **_k: sentinel)
+
+    result = runner.invoke(
+        app,
+        ["analyze", "--demo", "--measure", "--no-progress", "-y"],
+        env=_WIDE_ENV,
+    )
+
+    assert result.exit_code == 0, f"exited {result.exit_code}: {result.output}"
+    out = " ".join(result.output.split())
+    assert (
+        f"Demo sampling is pinned to {_DEMO_MEASURE_CANDIDATE} so trying "
+        "--measure needs only an OPENAI_API_KEY" in out
+    )
+    assert "on your own logs, --measure samples the actual recommendation" in out
+
+
+def test_demo_measure_with_explicit_candidates_skips_pin_disclosure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--demo --measure --candidates X does NOT print the pin disclosure —
+
+    the user stated an explicit candidate, so there is no pin to disclose
+    (the candidate_list is None gate on the pin branch is exactly this case).
+    """
+    _patch_measure_engine(monkeypatch)
+    comp = Comparison(
+        record=__import__("frugon.cost", fromlist=["LogRecord"]).LogRecord(
+            model="gpt-5.5",
+            messages=[{"role": "user", "content": "classify this ticket"}],
+            completion_text="technical",
+            prompt_tokens=40,
+            completion_tokens=5,
+            timestamp=None,
+        ),
+        current_output=SampledOutput(model="gpt-5.5", content="technical"),
+        candidate_outputs=[SampledOutput(model="gpt-4o-mini", content="technical")],
+        verdicts=["win"],
+    )
+    sentinel = MeasureResult(
+        samples_requested=1,
+        samples_taken=1,
+        current_model="gpt-5.5",
+        candidates=["gpt-4o-mini"],
+        comparisons=[comp],
+        tier1_tallies=[Tier1Tally(candidate="gpt-4o-mini", wins=1, losses=0, ties=0)],
+    )
+    monkeypatch.setattr(measure, "run_measure", lambda *_a, **_k: sentinel)
+
+    result = runner.invoke(
+        app,
+        [
+            "analyze",
+            "--demo",
+            "--candidates",
+            "gpt-4o-mini",
+            "--measure",
+            "--no-progress",
+            "-y",
+        ],
+        env=_WIDE_ENV,
+    )
+
+    assert result.exit_code == 0, f"exited {result.exit_code}: {result.output}"
+    out = " ".join(result.output.split())
+    assert "Demo sampling is pinned to" not in out

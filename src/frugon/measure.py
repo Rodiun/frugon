@@ -385,6 +385,17 @@ _LITELLM_ROUTE_PREFIX: dict[str, str] = {
     "glm-": "zai/",
     "minimax-": "minimax/",
     "qwen-": "dashscope/",
+    # FRG-OSS-036: the roster's "mistral-large-3" entry had a key mapping
+    # (_PROVIDER_KEY_MAP already has "mistral-" -> MISTRAL_API_KEY) but no
+    # routing prefix — the exact same bare-name gap the deepseek/grok/etc.
+    # entries above closed for their vendors. Confirmed against this repo's
+    # own .venv LiteLLM install: litellm.get_llm_provider("mistral-large-3")
+    # raises BadRequestError ("LLM Provider NOT provided"); the routed form
+    # litellm.get_llm_provider("mistral/mistral-large-3") resolves cleanly to
+    # the "mistral" provider. The bare "mistral-" prefix covers the whole
+    # family (mistral-large-3 is the only roster member today, but any future
+    # bare "mistral-*" addition needs the same prefix, not a per-model entry).
+    "mistral-": "mistral/",
     "llama-4-maverick-17b-128e-instruct": "groq/meta-llama/",
     "llama-4-scout-17b-16e-instruct": "groq/meta-llama/",
 }

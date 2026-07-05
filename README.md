@@ -99,7 +99,7 @@ frugon analyze ./logs.jsonl     # see the cost breakdown and routing recommendat
 ## What it does
 
 - **Cost analysis** — fully local, no LLM calls, no network. Tokenizers + pricing + arithmetic on your machine.
-- **Quality visibility** (`--measure`, optional) — samples your traffic through candidate models using *your own* API keys, sent directly to your own providers. Never to us. `--measure` needs `pip install 'frugon[measure]'` and a provider API key (`OPENAI_API_KEY`, etc.); calls go to your own provider, never to us.
+- **Quality visibility** (`--measure`, optional) — samples your traffic through candidate models using *your own* API keys, sent directly to your own providers. Never to us. `--measure` needs `pip install 'frugon[measure]'` and a provider API key (`OPENAI_API_KEY`, etc.); calls go to your own provider, never to us. On `--demo`, sampling is pinned to a single OpenAI model so the try-out needs only `OPENAI_API_KEY`; on your own logs, `--measure` samples the actual recommendation.
 - **Routing recommendation** — "move these X% of calls to a cheaper model and save ~$Y/mo; keep the hard Z% where they are." Comes with an explicit quality caveat so you know what you're trading.
   Run `frugon models` to see the model names available for `--candidates` (optionally `frugon models gpt-4o` to filter by substring).
 - **Share the result** — add `--report savings.html` (or `.md`) to write a clean, shareable report you can drop into a PR, a Slack thread, or a budget review.

@@ -593,7 +593,9 @@ def analyze(
             "Calls go to your own providers — never to us. "
             "Requires the optional [cyan]frugon\\[measure][/cyan] extra "
             "([cyan]pip install 'frugon\\[measure]'[/cyan]) and the relevant provider "
-            "API key (e.g. [cyan]OPENAI_API_KEY[/cyan])."
+            "API key (e.g. [cyan]OPENAI_API_KEY[/cyan]). "
+            "With --demo, sampling is pinned to a single OpenAI model so the "
+            "try-out needs only OPENAI_API_KEY."
         ),
         show_default=True,
     ),
@@ -1095,33 +1097,85 @@ def analyze(
         # production is the whole point of the demo. No demo-only pin here.
         _effective_candidates: list[str] | None = candidate_list
 
+        # The candidate count is knowable BEFORE analyze_records runs (either
+        # the caller's explicit --candidates list, or cost._ROUTING_CANDIDATES,
+        # the same default pool analyze_records falls back to when candidates
+        # is None) — imported here so the live bar can name the comparison
+        # stage the moment pricing finishes, without waiting on the result.
+        from frugon.cost import _ROUTING_CANDIDATES
+
+        _n_candidates_compared = (
+            len(_effective_candidates)
+            if _effective_candidates is not None
+            else len(_ROUTING_CANDIDATES)
+        )
+
+        # Two stopwatches over one call: `sw` spans the whole analyze_records()
+        # invocation (pricing + comparison + routing) for the existing "Priced
+        # in X.Xs" line; `sw_pricing` is stopped by the per-record callback's
+        # OWN final tick, so its elapsed reading is the genuinely-attributable
+        # pricing-only window. Comparison's own elapsed is then the remainder
+        # of the shared stopwatch — never a guessed or invented split.
+        #
+        # `sw_pricing` is started INSIDE the `with` block, immediately after
+        # `sw` begins — both stopwatches then share the exact same origin
+        # instant, so `sw.elapsed - sw_pricing.elapsed` below is the true
+        # comparison-only duration with zero systematic bias. Starting
+        # `sw_pricing` before the `with` (its previous shape) left a small
+        # delta between the two origins — the time to construct the Rich
+        # bar/context — which would make every "Compared … in X.Xs" reading
+        # UNDERSTATE the real comparison time by that delta (P3-1).
         with progress.bar("Pricing", total=len(analysis_records)) as pricing_task, Stopwatch() as sw:
+            sw_pricing = Stopwatch()
+            sw_pricing.__enter__()
+
+            def _on_priced(done: int, total: int) -> None:
+                pricing_task.advance(1)
+                if done >= total:
+                    sw_pricing.__exit__(None, None, None)
+
             result = analyze_records(
                 analysis_records,
                 window_days=window,
                 candidates=_effective_candidates,
                 skipped_malformed=analysis_skipped,
                 split_routing=not wholesale,
-                progress_cb=lambda done, total: pricing_task.advance(1),
+                progress_cb=_on_priced,
             )
+            # If comparison actually runs (there is more than one candidate and
+            # a routing result to compare), relabel the still-open bar so the
+            # LIVE line names the stage now running instead of sitting frozen
+            # on "Pricing" for however long the comparison pass takes. This is
+            # intentionally more permissive than the "Compared" checkpoint
+            # below: the relabel only needs to know a comparison stage is
+            # STARTING (candidate count > 1), so it names what's running even
+            # before there's an outcome to check; the checkpoint additionally
+            # requires `result.split`/`result.candidate_model` to exist before
+            # it prints, because that line reports what actually happened.
+            if _n_candidates_compared > 1:
+                pricing_task.relabel(f"Comparing {_n_candidates_compared} candidates…")
         progress.checkpoint(f"Priced in {sw.elapsed:.1f}s")
         # The candidates comparison (route each priced candidate's easy/hard
         # split against the baseline) runs INSIDE the analyze_records() call
         # above, after the per-record pricing bar has already reached 100% —
         # even with the redundant per-candidate difficulty reclassification
         # closed (FRG-OSS-038), comparing a couple dozen candidates is real
-        # work, not free. Naming the count here (rather than a silent second
-        # or so of nothing between "Priced" and the panel) is the honest
-        # trail entry for that phase.
-        _n_candidates_compared = (
-            len(_effective_candidates)
-            if _effective_candidates is not None
-            else result.candidate_pool_size
-        )
+        # work, not free. Naming the count AND the elapsed time here (rather
+        # than a silent second or so of nothing between "Priced" and the
+        # panel) is the honest trail entry for that phase. The elapsed figure
+        # is `sw.elapsed - sw_pricing.elapsed`: the whole-call stopwatch minus
+        # the pricing-only stopwatch (stopped by the callback's own final
+        # tick), i.e. exactly the time spent AFTER pricing finished — never a
+        # guessed window. Floored at 0.0 to absorb clock-granularity noise on
+        # the rare log so small pricing and comparison finish inside the same
+        # tick.
+        _compared_elapsed = max(0.0, sw.elapsed - sw_pricing.elapsed)
         if _n_candidates_compared > 1 and (
             result.split is not None or result.candidate_model is not None
         ):
-            progress.checkpoint(f"Compared {_n_candidates_compared} candidates")
+            progress.checkpoint(
+                f"Compared {_n_candidates_compared} candidates in {_compared_elapsed:.1f}s"
+            )
         if result.split is not None or result.candidate_model is not None:
             progress.checkpoint("Routed")
 
@@ -1267,6 +1321,18 @@ def analyze(
                 from frugon.cost import _DEMO_MEASURE_CANDIDATE
 
                 default_candidate = _DEMO_MEASURE_CANDIDATE
+                # FRG-OSS-040(a): disclose the pin at the point of use — right
+                # where it actually takes effect — rather than leaving the
+                # user to discover only after sampling that --demo --measure
+                # did not sample whatever the un-pinned roster recommended.
+                # Skipped when the user passed explicit --candidates with
+                # --demo (candidate_list is None is exactly this branch's
+                # gate, so no separate check is needed).
+                rprint(
+                    f"[dim]Demo sampling is pinned to {_DEMO_MEASURE_CANDIDATE} "
+                    "so trying --measure needs only an OPENAI_API_KEY — on your "
+                    "own logs, --measure samples the actual recommendation.[/dim]"
+                )
             elif result.split is not None and result.split.candidate_model:
                 default_candidate = result.split.candidate_model
             elif result.candidate_model:

@@ -232,6 +232,16 @@ class ProgressTask:
     def advance(self, n: int = 1) -> None:  # noqa: D401 — simple verb
         """Advance the bar by *n* units.  No-op in the null implementation."""
 
+    def relabel(self, description: str) -> None:  # noqa: D401 — simple verb
+        """Change the bar's live description.  No-op in the null implementation.
+
+        Used to swap the bar's message once its counted phase (e.g. per-record
+        pricing) completes but the underlying ``with`` block is still open for
+        a following, uncounted phase (e.g. candidate comparison) — so the live
+        line names the stage actually running instead of sitting frozen on the
+        prior phase's label.
+        """
+
 
 class _RichProgressTask(ProgressTask):
     """A live advance handle backed by a Rich :class:`Progress` task."""
@@ -242,6 +252,9 @@ class _RichProgressTask(ProgressTask):
 
     def advance(self, n: int = 1) -> None:
         self._progress.advance(self._task_id, n)
+
+    def relabel(self, description: str) -> None:
+        self._progress.update(self._task_id, description=description, refresh=True)
 
 
 _NULL_TASK = ProgressTask()

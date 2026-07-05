@@ -324,7 +324,8 @@ def _recommendation_divergence_note(measured_model: str, result: AnalysisResult 
     return (
         f"{measured_model} is the demo's try-out sample model, not the headline "
         f"recommendation ({recommended}); this verifies the --measure flow, not "
-        "the recommended switch."
+        "the recommended switch — the demo pins its sample model so the "
+        "try-out needs only an OpenAI key."
     )
 
 
