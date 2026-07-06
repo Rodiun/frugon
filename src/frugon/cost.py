@@ -1693,10 +1693,14 @@ def iter_records(path: Path) -> tuple[list[LogRecord], int]:
         if not line:
             continue
         try:
-            raw: dict[str, Any] = json.loads(line)
+            parsed: Any = json.loads(line)
         except json.JSONDecodeError:
             skipped_malformed += 1
             continue
+        if not isinstance(parsed, dict):
+            skipped_malformed += 1
+            continue
+        raw: dict[str, Any] = parsed
         rec = parse_record(raw)
         if rec is not None:
             records.append(rec)
@@ -1733,9 +1737,12 @@ def scan_models(path: Path) -> tuple[list[str], str | None]:
         if not line:
             continue
         try:
-            raw: dict[str, Any] = json.loads(line)
+            parsed: Any = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(parsed, dict):
+            continue
+        raw: dict[str, Any] = parsed
         model = raw.get("model")
         if not isinstance(model, str) or not model:
             continue

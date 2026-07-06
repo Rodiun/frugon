@@ -28,7 +28,9 @@ from frugon.cost import (
     analyze_records,
     compute_call_cost,
     compute_saving_pct,
+    iter_records,
     parse_record,
+    scan_models,
     window_contradicts_span,
 )
 from frugon.pricing import ModelPrice
@@ -1584,6 +1586,74 @@ class TestSkippedMalformed:
         path = _write_jsonl(records, tmp_path)
         result = analyze_logs(path)
         assert result.skipped_malformed == 0
+
+    def test_non_object_json_lines_increment_skipped_malformed(
+        self, tmp_path: Path
+    ) -> None:
+        """Arrange: a JSONL file where syntactically-valid non-object lines
+        (a bare array, a bare string, a bare number) are interleaved with two
+        valid records and one line that is invalid JSON entirely.
+        Act: iter_records.
+        Assert: no AttributeError — a non-dict parse result is counted in
+        skipped_malformed exactly like a JSON syntax error, and both valid
+        records still come through untouched (FRG-OSS-054).
+        """
+        path = tmp_path / "non_object_lines.jsonl"
+        valid_record = {
+            "model": "gpt-4o",
+            "request": {"messages": [{"role": "user", "content": "hi"}]},
+            "response": {
+                "choices": [{"message": {"role": "assistant", "content": "hello"}}]
+            },
+            "usage": {"prompt_tokens": 5, "completion_tokens": 2},
+        }
+        with path.open("w", encoding="utf-8") as fh:
+            fh.write(json.dumps(valid_record) + "\n")
+            fh.write(json.dumps([1, 2, 3]) + "\n")  # bare array
+            fh.write(json.dumps("just a string") + "\n")  # bare string
+            fh.write("this is not json\n")  # actual JSON syntax error
+            fh.write(json.dumps(42) + "\n")  # bare number
+            fh.write(json.dumps(valid_record) + "\n")
+
+        records, skipped_malformed = iter_records(path)
+
+        assert len(records) == 2
+        # 4 = 3 non-object lines (array, string, number) + 1 syntax-error line
+        assert skipped_malformed == 4
+
+
+# ---------------------------------------------------------------------------
+# scan_models — non-object JSON lines must not crash (FRG-OSS-054)
+# ---------------------------------------------------------------------------
+
+
+class TestScanModelsNonObjectLines:
+    """scan_models must treat a non-dict parse result like invalid JSON."""
+
+    def test_non_object_lines_do_not_crash_and_are_skipped(
+        self, tmp_path: Path
+    ) -> None:
+        """Arrange: a JSONL log with a bare array, a bare string, and a bare
+        number interleaved with valid model rows.
+        Act: scan_models.
+        Assert: no AttributeError; the distinct models and dominant model
+        reflect only the valid rows, exactly as if the non-object lines were
+        JSON syntax errors.
+        """
+        path = tmp_path / "non_object_models.jsonl"
+        with path.open("w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"model": "gpt-4o"}) + "\n")
+            fh.write(json.dumps([1, 2, 3]) + "\n")  # bare array
+            fh.write(json.dumps({"model": "gpt-4o"}) + "\n")
+            fh.write(json.dumps("just a string") + "\n")  # bare string
+            fh.write("this is not json\n")  # actual JSON syntax error
+            fh.write(json.dumps(42) + "\n")  # bare number
+            fh.write(json.dumps({"model": "gpt-4o-mini"}) + "\n")
+
+        distinct_models, dominant = scan_models(path)
+
+        assert distinct_models == ["gpt-4o", "gpt-4o-mini"]
+        assert dominant == "gpt-4o"
 
 
 # ---------------------------------------------------------------------------
