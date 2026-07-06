@@ -19,9 +19,12 @@ import http.client
 import http.server
 import json
 import pathlib
+import signal
 import socket
 import socketserver
+import sys
 import threading
+import time
 from collections.abc import Generator
 from typing import Any, cast
 
@@ -610,6 +613,60 @@ def test_capture_unknown_path_returns_404(
     assert not out_file.exists() or out_file.read_text(encoding="utf-8").strip() == ""
 
 
+def test_capture_unknown_path_emits_one_time_stderr_warning(
+    capture_srv: tuple[_DrainCaptureServer, int, pathlib.Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """FRG-OSS-045: an unmatched path (e.g. Anthropic's /v1/messages) gets a
+    one-time stderr warning naming the path and the supported paths — instead
+    of silently 404ing with zero other signal.
+
+    Arrange: capture server.
+    Act: POST to /v1/messages (an unsupported provider path) TWICE.
+    Assert: exactly ONE warning line is emitted (not two — the "once" in
+    one-time), and it names both the unmatched path and the supported paths.
+    """
+    srv, port, out_file = capture_srv
+
+    status1, _ = _post(port, "/v1/messages", _SAMPLE_REQUEST)
+    status2, _ = _post(port, "/v1/messages", _SAMPLE_REQUEST)
+    srv.drain()
+
+    assert status1 == 404
+    assert status2 == 404
+
+    err = capsys.readouterr().err
+    warning_lines = [line for line in err.splitlines() if "/v1/messages" in line]
+    assert len(warning_lines) == 1, (
+        f"expected exactly one warning for a repeated unmatched path, got "
+        f"{len(warning_lines)}:\n{err}"
+    )
+    assert "/v1/chat/completions" in warning_lines[0]
+    assert "/v1/completions" in warning_lines[0]
+
+
+def test_capture_unknown_path_warning_is_per_distinct_path(
+    capture_srv: tuple[_DrainCaptureServer, int, pathlib.Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """FRG-OSS-045: the one-time suppression is PER PATH, not global — a
+    second, DIFFERENT unmatched path still gets its own warning.
+
+    Arrange: capture server.
+    Act: POST to two distinct unsupported paths.
+    Assert: two distinct warning lines, one per path.
+    """
+    srv, port, out_file = capture_srv
+
+    _post(port, "/v1/messages", _SAMPLE_REQUEST)
+    _post(port, "/v1/responses", _SAMPLE_REQUEST)
+    srv.drain()
+
+    err = capsys.readouterr().err
+    assert "/v1/messages" in err
+    assert "/v1/responses" in err
+
+
 def test_capture_multiple_requests_append_multiple_lines(
     capture_srv: tuple[_DrainCaptureServer, int, pathlib.Path],
 ) -> None:
@@ -982,6 +1039,130 @@ def test_run_capture_with_explicit_upstream_skips_env_resolution(
     assert captured.get("upstream") == "http://explicit.test", (
         "Explicit upstream must take precedence over OPENAI_BASE_URL env var"
     )
+
+
+# ---------------------------------------------------------------------------
+# SIGTERM handling — FRG-OSS-043
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    sys.platform.startswith("win"), reason="SIGTERM delivery is POSIX-only"
+)
+def test_run_capture_registers_a_sigterm_handler(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Arrange: mock CaptureServer whose serve_forever raises KeyboardInterrupt
+    immediately (so run_capture returns without actually blocking).
+    Act: call run_capture.
+    Assert: the process's SIGTERM handler is no longer the default
+    (SIG_DFL/SIG_IGN) after run_capture starts — a real handler was installed.
+    """
+    import frugon.capture as cap_mod
+    from frugon.capture import run_capture
+
+    class _MockServer:
+        def __init__(self, **_: Any) -> None:
+            pass
+
+        def serve_forever(self) -> None:
+            raise KeyboardInterrupt
+
+        def shutdown(self) -> None:
+            pass
+
+        def server_close(self) -> None:
+            pass
+
+        def close_output(self) -> None:
+            pass
+
+    monkeypatch.setattr(cap_mod, "CaptureServer", _MockServer)
+
+    previous_handler = signal.getsignal(signal.SIGTERM)
+    try:
+        run_capture(port=0, out_path=tmp_path / "sigterm.jsonl")
+        installed_handler = signal.getsignal(signal.SIGTERM)
+        assert installed_handler not in (signal.SIG_DFL, signal.SIG_IGN), (
+            "run_capture must install a real SIGTERM handler, not leave the "
+            "default disposition in place"
+        )
+        assert callable(installed_handler)
+    finally:
+        signal.signal(signal.SIGTERM, previous_handler)
+
+
+@pytest.mark.skipif(
+    sys.platform.startswith("win"), reason="SIGTERM delivery is POSIX-only"
+)
+def test_sigterm_handler_triggers_clean_shutdown(tmp_path: pathlib.Path) -> None:
+    """Arrange: a REAL `frugon capture` process (a genuine child process, not
+    a thread in the test runner) bound to an ephemeral port.
+
+    IMPORTANT: this runs run_capture in a SEPARATE PROCESS rather than a
+    background thread of the test runner.  ``signal.signal()`` may only be
+    called from the main thread of the main interpreter — calling
+    run_capture() on a background *thread* (as an earlier draft of this test
+    did) makes its `signal.signal(SIGTERM, ...)` call raise ValueError, which
+    means NO handler gets installed, so the test's own `os.kill(getpid(),
+    SIGTERM)` falls through to the DEFAULT disposition and kills the entire
+    pytest process instead of the target.  A subprocess sidesteps this
+    entirely: the target is a fully separate PID with the signal
+    handler installed on ITS OWN main thread, and the parent test process is
+    never at risk.
+
+    Act: send the child process a real SIGTERM after it has had time to bind
+    the port and install the handler.
+    Assert: the child exits with code 0 (clean) within a generous timeout —
+    the existing `finally:` cleanup ran to completion rather than the process
+    being hard-killed mid-write.
+
+    This is the true end-to-end regression: before FRG-OSS-043, a `kill <pid>`
+    against a running `frugon capture` process terminated it WITHOUT ever
+    running capture.py's finally: block (unflushed writes, no clean socket
+    close, no default SIGTERM disposition override).
+    """
+    import subprocess
+
+    out_path = tmp_path / "sigterm_e2e.jsonl"
+    script = (
+        "import sys; sys.path.insert(0, 'src'); "
+        "import pathlib; from frugon.capture import run_capture; "
+        f"run_capture(port=0, out_path=pathlib.Path(r'{out_path}'))"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script],
+        cwd=str(pathlib.Path(__file__).resolve().parents[1]),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        # Give the child time to bind the port and install the SIGTERM
+        # handler before signalling — avoids a race where SIGTERM arrives
+        # before signal.signal() has been called (which would fall through
+        # to the default disposition, i.e. an immediate hard kill rather than
+        # the clean shutdown path this test verifies).
+        time.sleep(1.0)
+        proc.send_signal(signal.SIGTERM)
+        try:
+            returncode = proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5.0)
+            pytest.fail(
+                "frugon capture subprocess did not exit within 5s of SIGTERM "
+                "— the handler likely deadlocked or was never installed"
+            )
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5.0)
+
+    assert returncode == 0, (
+        f"expected clean exit (0) after SIGTERM, got {returncode}. "
+        f"stderr: {proc.stderr.read().decode('utf-8', errors='replace') if proc.stderr else ''}"
+    )
+    assert out_path.exists()  # the output file handle was opened and closed cleanly
 
 
 # ---------------------------------------------------------------------------
@@ -1430,6 +1611,230 @@ def test_capture_cli_default_proxy_is_none(
     assert captured.get("proxy") is None, (
         f"CLI default must thread proxy=None (privacy default); got {captured.get('proxy')!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Streaming (SSE) rejection — FRG-OSS-018
+# ---------------------------------------------------------------------------
+
+
+def test_capture_rejects_stream_true_with_400(
+    capture_srv: tuple[_DrainCaptureServer, int, pathlib.Path],
+) -> None:
+    """Arrange: capture server pointing at stub upstream.
+    Act: POST a request with "stream": true.
+    Assert: 400 response with a clear JSON error message; the request is
+    NEVER forwarded upstream (capture cannot support incremental SSE — it
+    would silently break streaming clients by buffering the whole response).
+    """
+    srv, port, out_file = capture_srv
+
+    request = {**_SAMPLE_REQUEST, "stream": True}
+    status, body = _post(port, "/v1/chat/completions", request)
+
+    assert status == 400
+    payload = json.loads(body)
+    assert "stream" in payload["error"]["message"].lower()
+
+    # Nothing was written to the output file — the call never completed.
+    assert out_file.read_text(encoding="utf-8") == ""
+
+
+def test_capture_stream_false_is_unaffected(
+    capture_srv: tuple[_DrainCaptureServer, int, pathlib.Path],
+) -> None:
+    """Arrange: capture server pointing at stub upstream.
+    Act: POST a request with "stream": false (explicit, common client default).
+    Assert: normal 200 forwarding path — the rejection targets ONLY
+    stream=true, not the mere presence of the key.
+    """
+    srv, port, out_file = capture_srv
+    request = {**_SAMPLE_REQUEST, "stream": False}
+
+    status, _ = _post(port, "/v1/chat/completions", request)
+    srv.drain()
+
+    assert status == 200
+    lines = out_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+
+
+def test_capture_stream_absent_is_unaffected(
+    capture_srv: tuple[_DrainCaptureServer, int, pathlib.Path],
+) -> None:
+    """Arrange: capture server pointing at stub upstream.
+    Act: POST a request with no "stream" key at all (the common non-streaming
+    request shape).
+    Assert: normal 200 forwarding path, unchanged from before this feature.
+    """
+    srv, port, out_file = capture_srv
+
+    status, _ = _post(port, "/v1/chat/completions", _SAMPLE_REQUEST)
+    srv.drain()
+
+    assert status == 200
+    lines = out_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+
+
+def test_capture_non_object_json_body_does_not_crash_stream_check(
+    capture_srv: tuple[_DrainCaptureServer, int, pathlib.Path],
+) -> None:
+    """Regression: a syntactically-valid JSON body that is NOT an object (a
+    bare array, string, number, bool, or null) must not crash the stream-flag
+    check added for FRG-OSS-018.
+
+    ``json.loads(b"[1, 2, 3]")`` succeeds (it is valid JSON) and returns a
+    ``list``, not a ``dict`` — calling ``.get("stream")`` on that list raises
+    an unhandled ``AttributeError`` that the existing
+    ``except (json.JSONDecodeError, UnicodeDecodeError)`` clause does NOT
+    catch (a list is not a decode failure). Before the fix, this crashed the
+    request-handling thread instead of degrading gracefully like every other
+    non-OpenAI-shaped body the capture proxy already tolerates.
+
+    Arrange: capture server.
+    Act: POST a raw JSON array (not an object) as the request body.
+    Assert: the connection does not crash/hang — a response is returned (the
+    request is forwarded, since it is not `stream: true`, matching how an
+    unparseable/malformed body is already tolerated elsewhere in do_POST) —
+    AND the call still reaches _build_record and writes a (degraded, empty
+    request_data) record rather than crashing before the write.
+    """
+    srv, port, out_file = capture_srv
+
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        body = b"[1, 2, 3]"
+        conn.request(
+            "POST",
+            "/v1/chat/completions",
+            body=body,
+            headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+        )
+        resp = conn.getresponse()
+        status = resp.status
+        resp.read()
+    finally:
+        conn.close()
+    srv.drain()
+
+    # The key assertion: no crash. A non-stream-true body forwards normally.
+    assert status == 200
+    lines = [ln for ln in out_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    # request_data degraded to {} (a bare array is not an OpenAI request
+    # object), so model/messages fall back to their _build_record defaults.
+    assert record["model"] == ""
+    assert record["request"]["messages"] == []
+
+
+def test_capture_non_object_json_upstream_response_does_not_crash(
+    capture_srv: tuple[_DrainCaptureServer, int, pathlib.Path],
+    stub_upstream: tuple[str, _StubServer],
+) -> None:
+    """Regression: a syntactically-valid, non-object JSON UPSTREAM RESPONSE
+    (e.g. an upstream returning a bare JSON string or array on an error path)
+    must not crash ``_build_record`` the same way a non-object REQUEST body
+    would — the response-side ``json.loads`` had the identical unguarded
+    ``dict[str, Any]`` annotation as the request side.
+
+    Arrange: stub upstream configured to return a non-dict JSON body.
+    Act: POST a normal (object) request through capture.
+    Assert: the call completes cleanly (200) and a record is still written,
+    with response_data degraded to {} rather than crashing on `.get("usage")`.
+    """
+    srv, port, out_file = capture_srv
+    _, stub = stub_upstream
+    # dict[str, Any] is the stub's declared type, but this exercises the
+    # SERVER's actual runtime behavior — json.dumps a bare list just as
+    # readily as a dict, and the wire format is what capture.py must handle.
+    stub.response = cast(Any, ["not", "an", "object"])
+
+    status, _ = _post(port, "/v1/chat/completions", _SAMPLE_REQUEST)
+    srv.drain()
+
+    assert status == 200
+    lines = [ln for ln in out_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    # response_data degraded to {} — usage falls back to _build_record's default.
+    assert record["usage"] == {}
+    assert record["response"] == {}
+
+
+def test_capture_startup_panel_shows_sensitivity_caution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FRG-OSS-019: the capture startup panel must warn that capture.jsonl
+    holds full prompts/completions and should be treated like a credential —
+    on EVERY platform (this is the load-bearing signal on Windows, where the
+    0o600 chmod below is a no-op).
+
+    Arrange: mock run_capture so the CLI returns immediately.
+    Act: invoke ``frugon capture``.
+    Assert: the caution text appears in the startup panel output.
+    """
+    monkeypatch.setattr(capture_mod, "run_capture", lambda **kwargs: None)
+    result = runner.invoke(
+        app, ["capture", "--port", "0"], env={"COLUMNS": "200", "TERM": "dumb"}
+    )
+    assert result.exit_code == 0, result.output
+    assert "treat it like a credential" in result.output
+
+
+@pytest.mark.skipif(
+    sys.platform.startswith("win"), reason="POSIX file-mode bits only"
+)
+def test_run_capture_sets_0o600_on_new_output_file(tmp_path: pathlib.Path) -> None:
+    """FRG-OSS-019: a freshly created capture.jsonl is owner-read/write only.
+
+    Arrange: an out_path that does not yet exist.
+    Act: construct CaptureServer (which opens/creates the file).
+    Assert: the file's POSIX mode bits are exactly 0o600 (no group/world
+    access), regardless of the process umask.
+    """
+    import stat
+
+    out_path = tmp_path / "capture.jsonl"
+    server = CaptureServer(port=0, out_path=out_path, upstream="https://api.openai.com")
+    try:
+        mode = stat.S_IMODE(out_path.stat().st_mode)
+        assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
+    finally:
+        server.close_output()
+        server.server_close()
+
+
+@pytest.mark.skipif(
+    sys.platform.startswith("win"), reason="POSIX file-mode bits only"
+)
+def test_run_capture_tightens_permissions_on_preexisting_loose_file(
+    tmp_path: pathlib.Path,
+) -> None:
+    """FRG-OSS-019: an ALREADY-EXISTING capture.jsonl with loose permissions
+    (e.g. from before this hardening landed, or a user's own umask) is
+    tightened to 0o600 on the next `frugon capture` start — not just at
+    initial creation.
+
+    Arrange: pre-create out_path with permissive 0o644.
+    Act: construct CaptureServer against that existing path.
+    Assert: mode is tightened to 0o600.
+    """
+    import stat
+
+    out_path = tmp_path / "capture.jsonl"
+    out_path.write_text("", encoding="utf-8")
+    out_path.chmod(0o644)
+    assert stat.S_IMODE(out_path.stat().st_mode) == 0o644  # sanity: loose before
+
+    server = CaptureServer(port=0, out_path=out_path, upstream="https://api.openai.com")
+    try:
+        mode = stat.S_IMODE(out_path.stat().st_mode)
+        assert mode == 0o600, f"expected tightened 0o600, got {oct(mode)}"
+    finally:
+        server.close_output()
+        server.server_close()
 
 
 def test_restricted_opener_rejects_non_http_proxy_scheme() -> None:

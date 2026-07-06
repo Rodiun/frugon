@@ -415,3 +415,37 @@ def test_counter_description_reads_prefix_count_label() -> None:
     assert progress.tasks[0].description == "Sampling prompt 1/5 · gpt-4o-mini"
     counter.step("gpt-4o-mini")
     assert progress.tasks[0].description == "Sampling prompt 2/5 · gpt-4o-mini"
+
+
+def test_counter_step_flips_finished_on_last_step() -> None:
+    """Regression for FRG-OSS-008: step() must report completed == total on
+    the FINAL call so Rich's task.finished (completed >= total) flips True.
+
+    Before the fix, ``completed=self._done - 1`` meant a 5-total counter never
+    exceeded completed=4 even after all 5 step() calls, so `.finished` stayed
+    False forever.  Masked in production because the call sites all use
+    ``transient=True`` progress bars torn down unconditionally by the `with
+    progress:` block — but the counter's own completion bookkeeping was wrong
+    regardless of what tears the bar down.
+    """
+    from rich.console import Console
+    from rich.progress import Progress, SpinnerColumn, TextColumn
+
+    from frugon._progress import _RichStepCounter
+
+    progress = Progress(
+        SpinnerColumn(spinner_name="dots"),
+        TextColumn("{task.description}"),
+        console=Console(stderr=True),
+    )
+    task_id = progress.add_task("Sampling prompt", total=5)
+    counter = _RichStepCounter(progress, task_id, "Sampling prompt", 5)
+
+    for i in range(1, 5):
+        counter.step(f"model-{i}")
+        assert progress.tasks[0].completed == i
+        assert not progress.tasks[0].finished
+
+    counter.step("model-5")
+    assert progress.tasks[0].completed == 5
+    assert progress.tasks[0].finished

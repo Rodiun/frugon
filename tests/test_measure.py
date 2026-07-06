@@ -23,6 +23,7 @@ from frugon.measure import (
     Tier1Tally,
     _call_model,
     _check_provider_keys,
+    _dedup_key,
     _friendly_cell,
     _judge_pair,
     _required_key_for_model,
@@ -201,6 +202,126 @@ def test_sample_records_dedup_reproducible_across_runs() -> None:
     assert [r.messages[0]["content"] for r in first] == [
         r.messages[0]["content"] for r in second
     ]
+
+
+# ---------------------------------------------------------------------------
+# _dedup_key — deterministic cross-process hashing (FRG-OSS-020)
+# ---------------------------------------------------------------------------
+
+
+def test_dedup_key_is_deterministic_across_calls() -> None:
+    """Arrange: two records with identical (system, last_user) content.
+    Act: hash both independently.
+    Assert: same key — the whole point of switching off builtin hash().
+
+    Regression for FRG-OSS-020: builtin ``hash()`` on str is salted by
+    PYTHONHASHSEED (randomized per-process by default), so the SAME logical
+    key would come out different across two invocations of the CLI. sha256
+    has no such per-process salt.
+    """
+    record_a = LogRecord(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": "You are terse."},
+            {"role": "user", "content": "What is 2+2?"},
+        ],
+        completion_text="4",
+        prompt_tokens=10,
+        completion_tokens=1,
+        timestamp=None,
+    )
+    record_b = LogRecord(
+        model="gpt-4o-mini",  # different model — key is content-only
+        messages=[
+            {"role": "system", "content": "You are terse."},
+            {"role": "user", "content": "What is 2+2?"},
+        ],
+        completion_text="four",
+        prompt_tokens=8,
+        completion_tokens=1,
+        timestamp=None,
+    )
+    assert _dedup_key(record_a) == _dedup_key(record_b)
+
+
+def test_dedup_key_returns_stable_sha256_hex_string() -> None:
+    """Arrange: a record.
+    Act: compute _dedup_key.
+    Assert: the return type is a 64-char lowercase hex string (sha256 digest),
+    not the builtin hash()'s platform-width signed int — pinning the contract
+    so a future refactor cannot silently regress to the non-deterministic path.
+    """
+    record = LogRecord(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": "Hello there"}],
+        completion_text="Hi!",
+        prompt_tokens=3,
+        completion_tokens=2,
+        timestamp=None,
+    )
+    key = _dedup_key(record)
+    assert isinstance(key, str)
+    assert len(key) == 64
+    assert all(c in "0123456789abcdef" for c in key)
+
+
+def test_dedup_key_distinct_for_distinct_content() -> None:
+    """Arrange: two records with different (system, last_user) pairs.
+    Act: hash both.
+    Assert: distinct keys — the dedup must not collapse genuinely different
+    prompts.
+    """
+    record_a = LogRecord(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": "prompt one"}],
+        completion_text="a",
+        prompt_tokens=1,
+        completion_tokens=1,
+        timestamp=None,
+    )
+    record_b = LogRecord(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": "prompt two"}],
+        completion_text="b",
+        prompt_tokens=1,
+        completion_tokens=1,
+        timestamp=None,
+    )
+    assert _dedup_key(record_a) != _dedup_key(record_b)
+
+
+def test_dedup_key_distinguishes_system_from_user_content() -> None:
+    """Arrange: two records whose system/last_user content values are swapped
+    across the delimiter boundary (e.g. "a" + "\\0" + "b" vs "a\\0b" formed
+    differently would collide under naive '+' concatenation without a
+    separator).
+    Act: hash both.
+    Assert: distinct keys — proves the NUL-delimited join does not let content
+    that crosses the system/user boundary collide.
+    """
+    record_a = LogRecord(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": "ab"},
+            {"role": "user", "content": "c"},
+        ],
+        completion_text="x",
+        prompt_tokens=1,
+        completion_tokens=1,
+        timestamp=None,
+    )
+    record_b = LogRecord(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": "a"},
+            {"role": "user", "content": "bc"},
+        ],
+        completion_text="y",
+        prompt_tokens=1,
+        completion_tokens=1,
+        timestamp=None,
+    )
+    assert _dedup_key(record_a) != _dedup_key(record_b)
 
 
 # ---------------------------------------------------------------------------

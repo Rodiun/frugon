@@ -760,7 +760,7 @@ measure = [
 
 [package.metadata]
 requires-dist = [
-    { name = "litellm", marker = "extra == 'measure'", specifier = ">=1.0.0" },
+    { name = "litellm", marker = "extra == 'measure'", specifier = ">=1.0.0,<2.0.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10.0" },
     { name = "platformdirs", specifier = ">=3.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },

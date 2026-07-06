@@ -17,12 +17,14 @@ import http.server
 import json
 import os
 import pathlib
+import signal
 import socketserver
 import sys
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+from types import FrameType
 from typing import IO, Any, cast
 
 _DEFAULT_UPSTREAM = "https://api.openai.com"
@@ -284,12 +286,29 @@ class _CaptureHandler(http.server.BaseHTTPRequestHandler):
                 break
             remaining -= len(chunk)
 
+    def _reject_json(self, *, status: int, message: str) -> None:
+        """Send a JSON error body ``{"error": {"message": ...}}`` at *status*.
+
+        Used for request-shape rejections (e.g. unsupported ``stream: true``)
+        where the client benefits from an actionable message rather than a
+        bare status code with an empty body.  The request body must already
+        be fully read by the caller before calling this (no draining is
+        performed here).
+        """
+        payload = json.dumps({"error": {"message": message}}).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
     def do_POST(self) -> None:
         if self.path not in _CAPTURE_PATHS:
             # Drain the body first: a client POSTing to an unknown path would
             # otherwise get a TCP RST (RemoteDisconnected) on macOS / Windows
             # when we close the connection with its body still unread.
             self._drain_body()
+            cast(CaptureServer, self.server).warn_unknown_path_once(self.path)
             self.send_response(404)
             self.end_headers()
             return
@@ -318,6 +337,39 @@ class _CaptureHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
         request_body = self.rfile.read(length)
+
+        # Reject streaming (SSE) requests explicitly (FRG-OSS-018) rather than
+        # silently breaking them.  capture's do_POST reads the FULL upstream
+        # response body via `resp.read(_MAX_BODY)` before ever writing
+        # anything back to the client — the opposite of SSE's incremental
+        # chunk-as-you-go contract.  Forwarding a `"stream": true` request
+        # today would make the caller wait for the ENTIRE completion to
+        # buffer, then receive it as one lump instead of a token stream:  a
+        # silent behavioural break, not a clean failure.  A malformed/
+        # non-JSON body is deliberately NOT rejected here — that is handled
+        # by the existing best-effort JSON parse below, which already
+        # degrades to an empty record rather than blocking the call.  A
+        # syntactically-valid-but-non-object JSON body (a bare array, string,
+        # number, bool, or null — e.g. `"stream"` or `[1,2,3]`) parses without
+        # raising JSONDecodeError, so it must be explicitly excluded before
+        # calling ``.get`` on it: an OpenAI-shaped request is always a JSON
+        # object, so anything else is simply not a candidate for the
+        # stream-flag check, not a crash.
+        try:
+            _parsed_body: Any = json.loads(request_body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            _parsed_body = {}
+        _stream_check: dict[str, Any] = _parsed_body if isinstance(_parsed_body, dict) else {}
+        if _stream_check.get("stream") is True:
+            self._reject_json(
+                status=400,
+                message=(
+                    "frugon capture does not support streaming (SSE) responses yet. "
+                    'Remove "stream": true (or set it to false) from your request, '
+                    "or call the provider directly for streaming calls."
+                ),
+            )
+            return
 
         srv = cast(CaptureServer, self.server)
         upstream_url = srv.upstream.rstrip("/") + self.path
@@ -356,16 +408,31 @@ class _CaptureHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        # A syntactically-valid-but-non-object JSON body (a bare array, string,
+        # number, bool, or null) parses without raising JSONDecodeError, but
+        # is not a dict — treating it as one crashes _build_record's `.get()`
+        # calls with an unhandled AttributeError.  An OpenAI-shaped
+        # request/response is always a JSON object, so anything else is
+        # exactly as "unparseable" for our purposes as invalid JSON: it
+        # degrades to an empty record rather than crashing the handler thread.
         body_unparseable = False
         try:
-            request_data: dict[str, Any] = json.loads(request_body)
+            _request_parsed: Any = json.loads(request_body)
         except (json.JSONDecodeError, UnicodeDecodeError):
+            _request_parsed = None
+        if isinstance(_request_parsed, dict):
+            request_data: dict[str, Any] = _request_parsed
+        else:
             request_data = {}
             body_unparseable = True
 
         try:
-            response_data: dict[str, Any] = json.loads(response_body)
+            _response_parsed: Any = json.loads(response_body)
         except (json.JSONDecodeError, UnicodeDecodeError):
+            _response_parsed = None
+        if isinstance(_response_parsed, dict):
+            response_data: dict[str, Any] = _response_parsed
+        else:
             response_data = {}
             body_unparseable = True
 
@@ -441,6 +508,54 @@ class CaptureServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         # Windows), keeping the JSONL artifact byte-identical across platforms.
         self._out_file: IO[str] = out_path.open("a", encoding="utf-8", newline="")
         self._file_lock = threading.Lock()
+        # Privacy hardening (FRG-OSS-019): capture.jsonl holds the FULL prompt
+        # and completion text of every captured call — as sensitive as an API
+        # key or a database dump.  Restrict to owner-read/write (0o600) on
+        # every start, whether the file was just created (umask may have left
+        # it group/world-readable) OR already existed from a prior run (a
+        # loose mode from before this hardening landed must also be tightened,
+        # not just left as-is).  os.chmod is a POSIX-only permission model —
+        # Windows has no equivalent bit pattern, so this is a no-op there
+        # (guarded by hasattr, matching the codebase's existing Windows-guard
+        # convention); Windows users get the amber caution line in the
+        # startup panel instead (see cli.py's `capture` command).
+        if hasattr(os, "chmod"):
+            try:
+                os.chmod(out_path, 0o600)
+            except OSError:
+                # Best-effort: an unusual filesystem (network share, some
+                # Docker bind-mount overlays) may reject chmod even though the
+                # preceding open() succeeded.  Never let a permissions
+                # tightening failure block capture from starting — the
+                # caution line in the startup panel still applies regardless.
+                pass
+        # One-time-per-path unmatched-request tracking (FRG-OSS-045): a client
+        # POSTing to a path outside _CAPTURE_PATHS (e.g. Anthropic's
+        # /v1/messages, OpenAI's /v1/responses) gets a 404 with ZERO other
+        # signal today — easy to misread as "capture is broken" rather than
+        # "this provider/endpoint shape isn't supported yet".  Guarded by a
+        # lock because ThreadingMixIn dispatches concurrent requests onto
+        # separate handler threads that all share this one server instance.
+        self._warned_unknown_paths: set[str] = set()
+        self._warned_unknown_paths_lock = threading.Lock()
+
+    def warn_unknown_path_once(self, path: str) -> None:
+        """Emit a one-time stderr warning for an unmatched capture path.
+
+        No-op on every call after the first for a given *path* (tracked for
+        the lifetime of this server instance) — a client hammering the same
+        wrong endpoint must not flood stderr with a repeated warning.
+        """
+        with self._warned_unknown_paths_lock:
+            if path in self._warned_unknown_paths:
+                return
+            self._warned_unknown_paths.add(path)
+        print(
+            f"frugon capture: WARNING received a request for {path!r}, which "
+            "frugon capture does not recognise. Supported paths: "
+            f"{sorted(_CAPTURE_PATHS)}.",
+            file=sys.stderr,
+        )
 
     def write_record(self, record: dict[str, Any]) -> None:
         """Append one JSON-serialised record + newline to the output file."""
@@ -519,6 +634,30 @@ def run_capture(
     except (ValueError, OSError) as exc:
         sys.stderr.write(f"error: {exc}\n")
         sys.exit(1)
+
+    # SIGTERM handling (FRG-OSS-043): before this, `kill <pid>` / systemd stop
+    # / a container orchestrator's shutdown signal terminated the process
+    # WITHOUT ever running the `finally:` block below — the in-flight
+    # capture.jsonl file handle was never flushed/closed, risking a truncated
+    # final line.  POSIX only: Windows has no SIGTERM delivery model
+    # equivalent to POSIX (a Windows `taskkill` maps closer to SIGKILL, which
+    # no handler can intercept on any OS) — guarded by hasattr so this is a
+    # clean no-op there rather than an AttributeError.
+    #
+    # The handler must NOT call server.shutdown() directly: shutdown() blocks
+    # until serve_forever()'s poll loop observes the stop request and exits —
+    # but signal handlers run ON THE THREAD THEY INTERRUPT, which here is the
+    # very same thread currently blocked inside serve_forever().  Calling
+    # shutdown() synchronously from the handler would deadlock (the thread
+    # would be waiting on itself).  Spawning shutdown() on a short-lived
+    # background thread lets the handler return immediately, so
+    # serve_forever()'s loop is free to notice the stop request and exit.
+    if hasattr(signal, "SIGTERM"):
+
+        def _handle_sigterm(signum: int, frame: FrameType | None) -> None:
+            threading.Thread(target=server.shutdown, daemon=True).start()
+
+        signal.signal(signal.SIGTERM, _handle_sigterm)
 
     try:
         server.serve_forever()

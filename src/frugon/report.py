@@ -21,6 +21,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from frugon._store import atomic_write_text as _atomic_write_text
 from frugon.cost import (
     AnalysisResult,
     EscalationSuggestion,
@@ -192,9 +193,13 @@ QUALITY_EQUAL_OR_BETTER = (
 PRIVACY_CAVEAT = "Your data never leaves your machine."
 
 # The footer privacy line for the split headline — the two clauses a buyer needs
-# at a glance.  Kept distinct from cli.PRIVACY_LINE (the fuller three-clause line
-# the wholesale path prints) so each surface reads at its own length.
-PRIVACY_LINE = (
+# at a glance.  Named (and kept) distinct from cli.PRIVACY_LINE (the fuller
+# three-clause line the wholesale path prints) so each surface reads at its
+# own length — the two constants are DELIBERATELY different strings for
+# different surfaces, not a duplicate (FRG-OSS-005b): a bare shared name
+# `PRIVACY_LINE` in both modules was the real smell (import-the-wrong-one
+# risk), fixed by giving this one a name that states what it actually is.
+SPLIT_FOOTER_PRIVACY_LINE = (
     "Your data never leaves your machine. Your keys go to your own providers."
 )
 
@@ -1954,7 +1959,7 @@ def _render_footer_core(
     rprint("")
 
     # Caveat 2 — privacy (muted, confident).
-    _print_hanging(Text(PRIVACY_LINE, style="dim"), hang=_FOOTER_HANG)
+    _print_hanging(Text(SPLIT_FOOTER_PRIVACY_LINE, style="dim"), hang=_FOOTER_HANG)
 
     # One upsell line → the product (cyan link).  The pitch and the URL share a
     # logical line that hangs under the text after the "→" gutter on wrap.
@@ -5427,7 +5432,7 @@ def _render_markdown_split(
         f"LMArena quality tiers, RouteLLM-style routing · {_methodology_tail_text(measure_result)}_",
         "",
     ]
-    output_path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
+    _atomic_write_text(output_path, "\n".join(lines))
 
 
 def _render_md_wholesale_swap_plan(result: AnalysisResult) -> list[str]:
@@ -5634,7 +5639,7 @@ def render_markdown(
             lines += ["", *quality_lines]
         lines += ["", "---", f"_{_methodology_note_text(measure_result)}_", ""]
 
-    output_path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
+    _atomic_write_text(output_path, "\n".join(lines))
 
 
 def render_markdown_v2(
@@ -5684,7 +5689,7 @@ def render_markdown_v2(
             f"_{_METHODOLOGY_NOTE}_",
             "",
         ]
-        output_path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
+        _atomic_write_text(output_path, "\n".join(lines))
         return
 
     # RECONCILIATION: gate on the raw percent (so a positive but sub-display-
@@ -5911,7 +5916,7 @@ def render_markdown_v2(
         "",
     ]
 
-    output_path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
+    _atomic_write_text(output_path, "\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -6561,12 +6566,11 @@ def render_html(
     """
     if _has_split(result):
         assert result.split is not None  # narrowed by _has_split
-        output_path.write_text(
+        _atomic_write_text(
+            output_path,
             _render_html_v1_split_body(
                 result, result.split, measure_result=measure_result, limits=limits
             ),
-            encoding="utf-8",
-            newline="\n",
         )
         return
 
@@ -6832,7 +6836,7 @@ def render_html(
     html = _HTML_TEMPLATE.format(
         css=_HTML_CSS + _quality_css(measure_result), body="\n".join(body_parts)
     )
-    output_path.write_text(html, encoding="utf-8", newline="\n")
+    _atomic_write_text(output_path, html)
 
 
 # ---------------------------------------------------------------------------
@@ -7823,7 +7827,7 @@ def render_html_v2(
             "</div>"
         )
         html = _HTML_TEMPLATE_V2.format(css=_HTML_CSS_V2, body="\n".join(parts))
-        output_path.write_text(html, encoding="utf-8", newline="\n")
+        _atomic_write_text(output_path, html)
         return
 
     # --- Per-call split routing is the headline when available ---
@@ -7835,7 +7839,7 @@ def render_html_v2(
         html = _HTML_TEMPLATE_V2.format(
             css=_HTML_CSS_V2 + _quality_css(measure_result), body=body
         )
-        output_path.write_text(html, encoding="utf-8", newline="\n")
+        _atomic_write_text(output_path, html)
         return
 
     # RECONCILIATION: gate on the raw percent (so a positive but sub-display-
@@ -8226,7 +8230,7 @@ def render_html_v2(
     html = _HTML_TEMPLATE_V2.format(
         css=_HTML_CSS_V2 + _quality_css(measure_result), body="\n".join(parts)
     )
-    output_path.write_text(html, encoding="utf-8", newline="\n")
+    _atomic_write_text(output_path, html)
 
 
 # ---------------------------------------------------------------------------

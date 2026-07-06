@@ -282,7 +282,16 @@ class _RichStepCounter(StepCounter):
         desc = f"{self._prefix} {self._done}/{self._total}"
         if label:
             desc = f"{desc} · {label}"
-        self._progress.update(self._task_id, description=desc, completed=self._done - 1)
+        # completed=self._done (not self._done - 1): each step() call marks a
+        # unit of work as DONE, so the Nth call on an N-total counter must
+        # report completed == total.  The previous `self._done - 1` never
+        # reached `total` even after the final step (e.g. 4/5 after 5 calls on
+        # a total of 5), so Rich's `task.finished` (== completed >= total)
+        # never flipped True — masked in practice because `transient=True`
+        # tears the bar down via the `with progress:` block regardless, but any
+        # caller inspecting `.finished` (or a future non-transient counter) saw
+        # a task that never reports itself complete.
+        self._progress.update(self._task_id, description=desc, completed=self._done)
 
 
 _NULL_COUNTER = StepCounter()

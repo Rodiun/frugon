@@ -271,6 +271,149 @@ class TestAtomicWriteJson:
 
 
 # ---------------------------------------------------------------------------
+# atomic_write_text (FRG-OSS-017)
+# ---------------------------------------------------------------------------
+
+
+class TestAtomicWriteText:
+    """atomic_write_text: NamedTemporaryFile-then-os.replace, symlink-safe."""
+
+    def test_writes_correct_content(self, tmp_path: Path) -> None:
+        """Arrange: destination path, text content.
+        Act: atomic_write_text.
+        Assert: file contains exactly the written text.
+        """
+        from frugon._store import atomic_write_text
+
+        out = tmp_path / "report.html"
+        atomic_write_text(out, "<html>hello</html>\n")
+
+        assert out.read_text(encoding="utf-8") == "<html>hello</html>\n"
+
+    def test_creates_parent_dirs(self, tmp_path: Path) -> None:
+        """Parent directories are created if they don't exist."""
+        from frugon._store import atomic_write_text
+
+        out = tmp_path / "nested" / "deep" / "out.md"
+        atomic_write_text(out, "# report\n")
+
+        assert out.exists()
+        assert out.read_text(encoding="utf-8") == "# report\n"
+
+    def test_no_tmp_file_remains_after_success(self, tmp_path: Path) -> None:
+        """No temp artifact remains in the destination directory after a
+        successful write — only the final file."""
+        from frugon._store import atomic_write_text
+
+        out = tmp_path / "out.html"
+        atomic_write_text(out, "content")
+
+        remaining = list(tmp_path.iterdir())
+        assert remaining == [out]
+
+    def test_overwrites_existing_regular_file(self, tmp_path: Path) -> None:
+        """Arrange: an existing regular file at the destination.
+        Act: atomic_write_text with new content.
+        Assert: old content is fully replaced (not appended/merged).
+        """
+        from frugon._store import atomic_write_text
+
+        out = tmp_path / "report.html"
+        out.write_text("OLD CONTENT", encoding="utf-8")
+
+        atomic_write_text(out, "NEW CONTENT")
+
+        assert out.read_text(encoding="utf-8") == "NEW CONTENT"
+
+    def test_preserves_lf_only_newlines_on_content_with_newlines(
+        self, tmp_path: Path
+    ) -> None:
+        """The written bytes on disk must be LF-only (no \\r\\n translation),
+        matching the historical write_text(..., newline="\\n") contract every
+        call site in report.py relied on — a cross-platform artifact-byte
+        guarantee (§7)."""
+        from frugon._store import atomic_write_text
+
+        out = tmp_path / "out.md"
+        atomic_write_text(out, "line one\nline two\nline three\n")
+
+        raw = out.read_bytes()
+        assert b"\r\n" not in raw
+        assert raw.count(b"\n") == 3
+
+    def test_raises_oserror_and_removes_tmp_on_failure(self, tmp_path: Path) -> None:
+        """On write failure, OSError propagates and no temp file survives."""
+        import os as _os
+
+        from frugon._store import atomic_write_text
+
+        out = tmp_path / "out.html"
+
+        def failing_fdopen(*args: object, **kwargs: object) -> Any:
+            raise OSError("disk full")
+
+        with patch.object(_os, "fdopen", failing_fdopen):
+            with pytest.raises(OSError, match="disk full"):
+                atomic_write_text(out, "content")
+
+        assert not out.exists()
+        # No stray temp file (matching the `.{name}.*.tmp` naming pattern) left behind.
+        assert not list(tmp_path.glob(f".{out.name}.*"))
+
+    @pytest.mark.skipif(
+        __import__("sys").platform.startswith("win"),
+        reason="symlink semantics under test are POSIX-specific",
+    )
+    def test_does_not_follow_symlink_into_target_file(self, tmp_path: Path) -> None:
+        """Arrange: *path* is a symlink pointing at an unrelated 'secret' file
+        elsewhere on disk (simulating an attacker-planted symlink, or a stale
+        leftover, at the report output path).
+        Act: atomic_write_text(path, new_content).
+        Assert: the symlink TARGET is left completely untouched — only the
+        symlink itself is atomically replaced by a fresh regular file
+        containing the new content.  This is the core regression for
+        FRG-OSS-017: the OLD `path.write_text(...)` would have overwritten
+        the secret file's contents in place.
+        """
+        from frugon._store import atomic_write_text
+
+        secret = tmp_path / "secret.txt"
+        secret.write_text("SENSITIVE ORIGINAL CONTENT", encoding="utf-8")
+
+        report_path = tmp_path / "report.html"
+        report_path.symlink_to(secret)
+
+        atomic_write_text(report_path, "<html>new report</html>")
+
+        # The symlink's original target is untouched.
+        assert secret.read_text(encoding="utf-8") == "SENSITIVE ORIGINAL CONTENT"
+        # report_path is now a fresh regular file (the symlink was replaced).
+        assert not report_path.is_symlink()
+        assert report_path.read_text(encoding="utf-8") == "<html>new report</html>"
+
+    @pytest.mark.skipif(
+        __import__("sys").platform.startswith("win"),
+        reason="symlink semantics under test are POSIX-specific",
+    )
+    def test_atomic_replace_happy_path_on_posix(self, tmp_path: Path) -> None:
+        """Arrange: destination does not yet exist.
+        Act: atomic_write_text.
+        Assert: destination is a regular file (not a symlink) with the exact
+        content, and no temp file remains — the ordinary non-symlink happy
+        path on POSIX.
+        """
+        from frugon._store import atomic_write_text
+
+        out = tmp_path / "fresh.html"
+        atomic_write_text(out, "<html>fresh</html>")
+
+        assert out.is_file()
+        assert not out.is_symlink()
+        assert out.read_text(encoding="utf-8") == "<html>fresh</html>"
+        assert list(tmp_path.iterdir()) == [out]
+
+
+# ---------------------------------------------------------------------------
 # validate_fetch_url
 # ---------------------------------------------------------------------------
 

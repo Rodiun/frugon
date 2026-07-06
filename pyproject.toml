@@ -35,7 +35,7 @@ dependencies = [
 
 [project.optional-dependencies]
 measure = [
-    "litellm>=1.0.0",
+    "litellm>=1.0.0,<2.0.0",
 ]
 dev = [
     "pytest>=8.0.0",

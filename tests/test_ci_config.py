@@ -73,6 +73,64 @@ def test_strict_coverage_config_gates_cost_math_triad_at_90_percent() -> None:
     assert (ROOT / "src" / "frugon" / "routing.py").exists()
 
 
+def test_every_workflow_declares_a_top_level_permissions_block() -> None:
+    """Supply-chain hardening (FRG-OSS-042): every workflow file under
+    .github/workflows/ must declare an explicit top-level ``permissions:``
+    block.  Without one, GITHUB_TOKEN defaults to the repository's configured
+    default (which can be as broad as read/write on every scope) — an
+    invisible, drifting privilege level.  A workflow-level block is required
+    even when a job overrides it more narrowly (e.g. release.yml's publish
+    job further restricts to id-token: write for Trusted Publishing).
+
+    A top-level block is recognised as a ``permissions:`` line at column 0
+    (not indented under a job), which distinguishes it from a job-level-only
+    ``permissions:`` block (indented under `jobs: <name>:`).
+    """
+    workflow_files = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
+    assert workflow_files, "expected at least one workflow file"
+
+    top_level_permissions_re = re.compile(r"(?m)^permissions:\s*$")
+
+    for path in workflow_files:
+        text = path.read_text(encoding="utf-8")
+        assert top_level_permissions_re.search(text), (
+            f"{path.name}: missing a top-level `permissions:` block "
+            "(GITHUB_TOKEN would fall back to the repo default scope)"
+        )
+
+
+def test_ci_triggers_on_pull_requests_from_any_source_branch() -> None:
+    """FRG-OSS-044: ci.yml must run on pull requests targeting main regardless
+    of which branch the PR comes from.
+
+    ``pull_request:`` filtered by ``branches:`` matches on the PR's BASE
+    (target) branch, not its head (source) branch — so
+    ``pull_request: branches: ["main"]`` already covers a PR from ANY source
+    branch as long as it targets main.  This test pins that behaviour
+    explicitly so a future edit that narrows the trigger (e.g. accidentally
+    scoping by head branch, or dropping the pull_request trigger entirely)
+    is caught here rather than silently starving feature-branch PRs of CI.
+    """
+    workflow = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+
+    assert "push:" in workflow
+    assert "pull_request:" in workflow
+    # The pull_request trigger must not be scoped by a `types:` allowlist that
+    # excludes the default (opened/synchronize/reopened) events, and must
+    # target main via `branches:` — confirming both triggers fire on every
+    # ordinary push-to-main and every PR aimed at main.
+    pr_block_match = re.search(
+        r"pull_request:\n(?P<body>(?:[ \t]+\S.*\n)+)", workflow
+    )
+    assert pr_block_match is not None, "pull_request: trigger block not found"
+    pr_body = pr_block_match.group("body")
+    assert 'branches: ["main"]' in pr_body or "branches:\n" in pr_body
+    assert "types:" not in pr_body, (
+        "pull_request trigger must not restrict event types away from the "
+        "default (opened/synchronize/reopened)"
+    )
+
+
 def test_release_and_sync_workflows_pin_actions_to_commit_shas() -> None:
     """Supply-chain hardening: the publish/sync workflows (which push to PyPI and
     open PRs) must pin every third-party action to a full 40-hex commit SHA, not a

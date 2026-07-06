@@ -560,6 +560,8 @@ def capture(
             "Calls are forwarded to your provider and saved locally. "
             "Nothing reaches us.\n\n"
             f"[dim]{PRIVACY_LINE}[/dim]\n\n"
+            "[bold yellow]⚠ This file contains full prompts and completions — "
+            "treat it like a credential.[/bold yellow]\n\n"
             "[dim]Press Ctrl+C to stop.[/dim]",
             title="[bold]frugon capture[/bold]",
             border_style="green",

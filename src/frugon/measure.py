@@ -10,6 +10,7 @@ Privacy invariant:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import random
@@ -802,7 +803,7 @@ def _friendly_cell(exc: Exception) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _dedup_key(record: LogRecord) -> int:
+def _dedup_key(record: LogRecord) -> str:
     """Content-hash key used to dedup records by UNIQUE PROMPT.
 
     Frugon's quality measurement asks "does the candidate answer THIS prompt as
@@ -816,6 +817,13 @@ def _dedup_key(record: LogRecord) -> int:
     determined by the latest user turn given the system instruction, so two
     records that share (system, last_user) will exercise the candidate
     identically and one of them is enough.
+
+    Uses ``hashlib.sha256`` over a canonical delimited string rather than the
+    builtin ``hash()``.  Builtin ``hash()`` on strings is salted per-process by
+    ``PYTHONHASHSEED`` (randomized by default since Python 3.3), so the SAME
+    prompt would dedup to a DIFFERENT key across two runs of the CLI — silently
+    breaking any reproducibility expectation across processes.  sha256 is
+    stable across processes, interpreters, and platforms.
     """
     system_msg = next(
         (
@@ -829,7 +837,11 @@ def _dedup_key(record: LogRecord) -> int:
     for m in record.messages:
         if m.get("role") == "user" and m.get("content"):
             last_user = m["content"]
-    return hash((system_msg, last_user))
+    # Length-prefixing the first component makes the join truly injective —
+    # JSON string content can legally carry a NUL (the "\u0000" escape), so a
+    # bare NUL join alone could collide two distinct (system, user) pairs.
+    canonical = f"{len(system_msg)}\0{system_msg}\0{last_user}"
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def sample_records(
@@ -864,7 +876,7 @@ def sample_records(
     # each group is the representative — deterministic across reruns regardless
     # of how many duplicates trail it.
     representatives: list[LogRecord] = []
-    seen_keys: set[int] = set()
+    seen_keys: set[str] = set()
     for rec in records:
         key = _dedup_key(rec)
         if key in seen_keys:

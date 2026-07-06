@@ -6,6 +6,14 @@ on:
   pull_request:
     branches: ["main"]
 
+# Least-privilege default: this workflow only checks out the repo and runs
+# lint/type-check/tests — it never pushes, comments, or opens a PR, so
+# read-only access to repo contents is all it needs.  Every other workflow in
+# this repo (release.yml, pricing-sync.yml, quality-sync.yml) already declares
+# an explicit permissions block; this closes the one remaining gap.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: "Python ${{ matrix.python-version }} / ${{ matrix.os }}"

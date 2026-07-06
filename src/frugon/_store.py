@@ -1,14 +1,16 @@
-"""frugon._store — shared persistence helpers for pricing and quality modules.
+"""frugon._store — shared persistence helpers for pricing, quality, and report.
 
-Provides atomic JSON writes, first-run seeding, and fetch-URL validation
-used by both pricing.py and quality.py to eliminate code duplication.
+Provides atomic JSON/text writes, first-run seeding, and fetch-URL validation
+used by pricing.py, quality.py, and report.py to eliminate code duplication.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -92,6 +94,60 @@ def atomic_write_json(
         tmp.replace(path)
     except OSError:
         tmp.unlink(missing_ok=True)
+        raise
+
+
+def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+    """Write *text* to *path* via a NamedTemporaryFile-then-``os.replace`` swap.
+
+    Symlink-safety (FRG-OSS-017): a naive ``path.write_text(...)`` FOLLOWS a
+    symlink at *path* and overwrites whatever the symlink points to — if
+    *path* is a symlink planted by an attacker (or left over from a prior,
+    unrelated file) pointing at e.g. ``~/.ssh/authorized_keys``, a plain
+    write_text call corrupts that target, not just "the report file".  This
+    helper never opens *path* directly for writing: it creates a new,
+    exclusively-named temp file IN THE SAME DIRECTORY (so the final
+    ``os.replace`` is on the same filesystem — no cross-device rename
+    failure), writes the content there, then atomically replaces *path* with
+    it.  ``os.replace`` on a symlink target REPLACES THE SYMLINK ITSELF (it
+    does not dereference and write through it) — so even if *path* already is
+    a symlink, only the link is swapped for a fresh regular file; the
+    original symlink target is left completely untouched.
+
+    Creates parent directories as needed.  Raises OSError on failure; the
+    temp file is removed before re-raising so no stray temp file survives a
+    failed write.  newline="" is NOT passed here (unlike the raw write_text
+    calls this replaces) because every call site already produces
+    ``\\n``-only content and Python's default text-mode write on the temp
+    file's file object performs no newline translation when the string
+    itself contains only ``\\n`` — this preserves the existing
+    byte-for-byte LF-only artifact.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    fd_wrapped = False
+    try:
+        with os.fdopen(fd, "w", encoding=encoding, newline="") as fh:
+            fd_wrapped = True
+            fh.write(text)
+        os.replace(tmp_name, path)
+    except OSError:
+        # If os.fdopen() itself raised, the raw fd from mkstemp was never
+        # wrapped (and so never closed by the `with` block's __exit__) — an
+        # open handle on the temp file blocks its own deletion on Windows.
+        # Close it defensively before attempting cleanup so the unlink below
+        # can actually succeed on every platform.
+        if not fd_wrapped:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
         raise
 
 

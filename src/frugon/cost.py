@@ -18,7 +18,9 @@ Privacy: analysis is 100% local. No network calls are made by this module.
 from __future__ import annotations
 
 import functools
+import gzip
 import json
+import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
@@ -1573,6 +1575,56 @@ def analyze_records(
 # Main analysis entry point
 # ---------------------------------------------------------------------------
 
+# Hard ceiling on the DECOMPRESSED size of a ``.gz`` log, in bytes.  A gzip
+# stream's uncompressed size is attacker-controlled independent of its
+# on-disk (compressed) size — a small, crafted ``.gz`` can expand to gigabytes
+# ("gzip bomb"), which an uncapped `gzip.decompress(path.read_bytes())` would
+# happily materialise fully in memory before any other check runs.  Streaming
+# the decompression in bounded chunks and aborting once this ceiling is
+# crossed keeps a hostile or corrupted ``.gz`` from OOMing the process.
+# ~512MB comfortably covers any real frugon workload — the bundled --demo
+# fixture (tens of thousands of records) decompresses to a few MB — while
+# still catching a bomb long before it exhausts a typical developer machine.
+# Overridable via FRUGON_MAX_GZ_DECOMPRESSED_BYTES for tests that need a small
+# ceiling to exercise this path without generating a 512MB fixture.
+_DEFAULT_MAX_DECOMPRESSED_GZ_BYTES = 512 * 1024 * 1024  # 512 MiB
+
+# Chunk size for the bounded streaming read below.  Small enough that the
+# ceiling check fires promptly after being crossed, large enough to keep the
+# per-chunk call overhead negligible for a legitimate multi-hundred-MB log.
+_GZ_READ_CHUNK_BYTES = 1024 * 1024  # 1 MiB
+
+
+def _max_decompressed_gz_bytes() -> int:
+    """Return the active decompressed-size ceiling for ``.gz`` log reads.
+
+    Reads ``FRUGON_MAX_GZ_DECOMPRESSED_BYTES`` from the environment on every
+    call (not cached at import time) so tests can monkeypatch the environment
+    per-test.  Falls back to the 512MB default on an absent, empty, or
+    unparseable value — a malformed override must never silently DISABLE the
+    cap.
+    """
+    raw = os.environ.get("FRUGON_MAX_GZ_DECOMPRESSED_BYTES")
+    if not raw:
+        return _DEFAULT_MAX_DECOMPRESSED_GZ_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_MAX_DECOMPRESSED_GZ_BYTES
+    return value if value > 0 else _DEFAULT_MAX_DECOMPRESSED_GZ_BYTES
+
+
+class LogReadError(OSError):
+    """Raised when a log file cannot be read: corrupt/truncated gzip, or a
+    decompressed ``.gz`` payload that exceeds the safety ceiling.
+
+    Subclasses ``OSError`` (not a bespoke base) so every existing call site
+    that already does ``except OSError as exc: ...  {exc.strerror or exc}``
+    (frugon.cli's analyze / --measure pre-flight paths) handles this new
+    failure mode with zero changes — the clean Rich error panel fires
+    automatically instead of a raw traceback.
+    """
+
 
 def _read_log_text(path: Path) -> str:
     """Read a JSONL log file as UTF-8 text, transparently decompressing ``.gz``.
@@ -1585,11 +1637,42 @@ def _read_log_text(path: Path) -> str:
     stays 100% local — gzip decompression makes no network call (privacy
     invariant).  A UTF-8 decode error is raised to the caller unchanged so the
     CLI's friendly "not valid UTF-8" message still fires (§4 fail-loud).
+
+    The ``.gz`` path streams the decompression in bounded chunks (never loading
+    the whole payload via a single unbounded ``gzip.decompress()`` call) and
+    raises :class:`LogReadError` — an ``OSError`` subclass — if: the stream is
+    not valid gzip (``BadGzipFile``), the stream is truncated mid-record
+    (``EOFError``), or the decompressed size crosses
+    :func:`_max_decompressed_gz_bytes` (gzip-bomb guard).  Each of those is a
+    clean, actionable failure for the CLI's existing ``except OSError`` panel
+    rather than an unbounded memory allocation or an unhandled traceback.
     """
     if path.suffix == ".gz":
-        import gzip
-
-        return gzip.decompress(path.read_bytes()).decode("utf-8")
+        ceiling = _max_decompressed_gz_bytes()
+        chunks: list[bytes] = []
+        total = 0
+        try:
+            with gzip.open(path, "rb") as gz_file:
+                while True:
+                    chunk = gz_file.read(_GZ_READ_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > ceiling:
+                        raise LogReadError(
+                            f"{path}: decompressed size exceeds the "
+                            f"{ceiling:,}-byte safety limit. This looks like a "
+                            "corrupted or maliciously crafted .gz file — frugon "
+                            "will not decompress it fully into memory."
+                        )
+                    chunks.append(chunk)
+        except gzip.BadGzipFile as exc:
+            raise LogReadError(f"{path}: not a valid gzip file ({exc}).") from exc
+        except EOFError as exc:
+            raise LogReadError(
+                f"{path}: the gzip stream is truncated or corrupted ({exc})."
+            ) from exc
+        return b"".join(chunks).decode("utf-8")
     return path.read_text(encoding="utf-8")
 
 
