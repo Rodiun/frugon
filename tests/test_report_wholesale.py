@@ -311,7 +311,7 @@ class TestWholesaleFooter:
     def test_footer_upsell(self, capsys: Any) -> None:
         render_terminal(_result_wholesale())
         out = " ".join(capsys.readouterr().out.split())
-        assert "Route every call automatically and hold the saving" in out
+        assert "Route every call automatically and hold the savings" in out
         assert FUNNEL_URL in out
 
     def test_unrated_tier_note_folds_into_footer(self, capsys: Any) -> None:

@@ -54,7 +54,7 @@ def _resolve_judge_model(
          in the environment (``best_judge_for_available_keys``) — so a user who
          holds only an Anthropic / Gemini / DeepSeek / OpenRouter key gets a judge
          they can actually reach, NOT a hard OpenAI default they cannot; else
-      4. ``DEFAULT_JUDGE_MODEL`` (gpt-4o) ONLY when the OpenAI key it requires is
+      4. ``DEFAULT_JUDGE_MODEL`` (gpt-4.1) ONLY when the OpenAI key it requires is
          actually present; else
       5. ``None`` — no judge is resolvable from the present keys.  The CLI then
          renders the clean fail-fast panel directing the user to set a provider

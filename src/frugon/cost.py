@@ -604,7 +604,7 @@ def best_judge_from_log(models: Iterable[str]) -> str | None:
 
     Used to default the ``--judge`` judge to the best model the user ALREADY has
     a key for: the strongest model that actually appears in their own log.  This
-    avoids hard-defaulting to an arbitrary external model (e.g. gpt-4o) the user
+    avoids hard-defaulting to an arbitrary external model (e.g. gpt-4.1) the user
     may have no key for.
 
     Tier semantics (frugon.quality): LOWER integer = BETTER quality (0 = Elite),

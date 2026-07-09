@@ -25,6 +25,15 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          # Pushing a release tag runs THIS workflow and ci.yml concurrently
+          # against the same commit. Both setup-uv steps otherwise share the
+          # default cache key, so whichever job's cache-save loses the race
+          # logs a spurious "Failed to save: Unable to reserve cache" on
+          # every release. A distinct suffix per job (test vs build below)
+          # gives each its own cache entry so neither depends on winning a
+          # race against the other jobs' setup-uv steps.
+          cache-suffix: "release-test"
 
       - name: Install project with dev dependencies
         run: uv sync --extra dev --extra measure --frozen
@@ -55,6 +64,11 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          # See the "test" job's setup-uv step above: a distinct suffix per
+          # job avoids the cache-save race between this workflow's own jobs
+          # and the concurrently-triggered ci.yml run on the same tag push.
+          cache-suffix: "release-publish"
 
       # Align the package version with the pushed git tag so the published
       # wheel/sdist matches the release. Strips a leading "v" from the tag

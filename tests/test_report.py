@@ -247,7 +247,7 @@ def test_terminal_report_upsell_present_when_candidate(capsys: Any) -> None:
     Assert: the footer upsell line + URL are shown (normalised across Rich wrapping).
 
     The redesigned wholesale footer carries one upsell line ("Route every call
-    automatically and hold the saving:  <url>"), the split design language's
+    automatically and hold the savings:  <url>"), the split design language's
     single funnel pointer — not the legacy FUNNEL_LINE sentence.
     """
     from frugon.report import FUNNEL_URL
@@ -256,7 +256,7 @@ def test_terminal_report_upsell_present_when_candidate(capsys: Any) -> None:
 
     # Rich may word-wrap long lines; normalise newlines+indent to spaces before matching.
     out = " ".join(capsys.readouterr().out.split())
-    assert "Route every call automatically and hold the saving" in out
+    assert "Route every call automatically and hold the savings" in out
     assert FUNNEL_URL in out
 
 
@@ -270,7 +270,7 @@ def test_terminal_report_upsell_absent_when_no_candidate(capsys: Any) -> None:
     render_terminal(_result_no_candidate())
 
     out = " ".join(capsys.readouterr().out.split())
-    assert "Route every call automatically and hold the saving" not in out
+    assert "Route every call automatically and hold the savings" not in out
     assert FUNNEL_URL not in out
 
 
@@ -284,7 +284,7 @@ def test_terminal_report_upsell_absent_when_suppress_caveat(capsys: Any) -> None
     render_terminal(_result_with_candidate(), suppress_caveat=True)
 
     out = " ".join(capsys.readouterr().out.split())
-    assert "Route every call automatically and hold the saving" not in out
+    assert "Route every call automatically and hold the savings" not in out
     assert FUNNEL_URL not in out
 
 def test_markdown_report_funnel_line_present_when_candidate(tmp_path: Any) -> None:

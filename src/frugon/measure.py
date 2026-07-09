@@ -85,14 +85,20 @@ class UnknownModelError(RuntimeError):
 # as a module constant so the CLI's fail-fast pre-check can include it in the
 # required-key scan without re-hardcoding the name.
 #
-# Why gpt-4o (a STRONGER model) and not gpt-4o-mini: the most common candidate a
-# user measures IS gpt-4o-mini (the headline cheap-routing target).  A judge that
-# is the same model as the candidate grades its own output — a self-evaluation
-# bias that systematically flatters the candidate's verdict.  gpt-4o is a strong,
-# widely-available model that is independent of the typical candidate, so the
-# verdict is an arm's-length judgement rather than self-assessment.  The user can
-# always override with --judge-model.
-DEFAULT_JUDGE_MODEL = "gpt-4o"
+# This is the LAST-RESORT arm's-length fallback, not the primary judge choice.
+# _resolve_judge_model's precedence is: (1) an explicit --judge-model flag —
+# the user's stated intent; (2) the highest quality-tier model already present
+# in the user's OWN log (best_judge_from_log) — they already hold a key for
+# it; (3) the highest quality-tier rated+priced model whose provider key IS
+# present in the environment (best_judge_for_available_keys) — so a user
+# without an OpenAI key still gets a reachable judge; (4) THIS constant, and
+# only when OPENAI_API_KEY is actually set.  gpt-4.1 is not in the 23-candidate
+# roster, is not the demo baseline, and is not the sample-log pin — it exists
+# solely as a strong, current, independent OpenAI model to judge against, so a
+# judge never grades a candidate that is itself (a self-evaluation bias that
+# would systematically flatter the candidate's verdict).  The user can always
+# override with --judge-model.
+DEFAULT_JUDGE_MODEL = "gpt-4.1"
 
 # Default for the public ``--concurrency`` flag (and ``run_measure``'s
 # ``concurrency=`` parameter): the per-stage worker ceiling when the caller does
@@ -1148,9 +1154,11 @@ def run_measure(
         n_samples:     Number of prompts to sample (default 5).
         use_judge:     When True, a judge model scores each comparison (Tier-1).
         judge_model:   Model to use as judge when use_judge=True.  Defaults to
-                       DEFAULT_JUDGE_MODEL (gpt-4o) — a strong model independent
-                       of the typical candidate, so the judge does not grade its
-                       own output.  When the resolved judge IS one of the models
+                       DEFAULT_JUDGE_MODEL (gpt-4.1) — the last-resort arm's-length
+                       fallback (see the constant's docstring for the full
+                       precedence), independent of the typical candidate, so the
+                       judge does not grade its own output.  When the resolved
+                       judge IS one of the models
                        it scores, the offending names are surfaced in
                        MeasureResult.self_judged_models (a non-blocking caution).
         judge_from_log: True when *judge_model* was auto-selected as the highest

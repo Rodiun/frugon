@@ -204,7 +204,7 @@ SPLIT_FOOTER_PRIVACY_LINE = (
 )
 
 # The single upsell destination shown in the footer (cyan link).  The product
-# pitch ("route every call automatically and hold the saving") lives in the
+# pitch ("route every call automatically and hold the savings") lives in the
 # footer text; this is just the URL.
 FUNNEL_URL = "https://frugon.rodiun.io"
 
@@ -627,7 +627,7 @@ QUALITY_CAVEAT = (
 # Funnel line shown at the end of every report when a saving is present.
 # Points to the automated paid layer without overselling.
 FUNNEL_LINE = (
-    "This is a one-time snapshot. Frugon can route every call automatically and hold the saving for you."
+    "This is a one-time snapshot. Frugon can route every call automatically and hold the savings for you."
     " → https://frugon.rodiun.io"
 )
 
@@ -1963,7 +1963,7 @@ def _render_footer_core(
 
     # One upsell line → the product (cyan link).  The pitch and the URL share a
     # logical line that hangs under the text after the "→" gutter on wrap.
-    upsell = Text("Route every call automatically and hold the saving:  ", style="dim")
+    upsell = Text("Route every call automatically and hold the savings:  ", style="dim")
     upsell.append(FUNNEL_URL, style=BRAND_CYAN)
     _print_hanging(upsell, hang=_FOOTER_HANG, prefix=Text("→ ", style="dim"))
 
@@ -2105,7 +2105,7 @@ def _render_split_verbose(result: AnalysisResult, split: SplitRouting) -> None:
 
     # Automated-routing upsell.
     automate = Text(
-        "frugon can route every call automatically and hold the saving for you → ",
+        "frugon can route every call automatically and hold the savings for you → ",
         style="dim",
     )
     automate.append("https://frugon.rodiun.io", style=BRAND_CYAN)
@@ -2454,7 +2454,7 @@ def _render_wholesale_verbose(result: AnalysisResult) -> None:
 
     # Automated-routing upsell — same as the split verbose block.
     automate = Text(
-        "frugon can route every call automatically and hold the saving for you → ",
+        "frugon can route every call automatically and hold the savings for you → ",
         style="dim",
     )
     automate.append("https://frugon.rodiun.io", style=BRAND_CYAN)

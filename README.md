@@ -151,7 +151,7 @@ $ frugon analyze --demo --candidates claude-sonnet-4-5,gpt-4.1,claude-haiku-4-5,
   run --measure to confirm it on your real outputs before you switch.
 
   Your data never leaves your machine. Your keys go to your own providers.
-→ Route every call automatically and hold the saving:  https://frugon.rodiun.io
+→ Route every call automatically and hold the savings:  https://frugon.rodiun.io
 
 Recommendations use a curated set of current top models across providers, drawn
 from OpenRouter usage rankings. Prices synced 2026-07-02 from the LiteLLM 

@@ -131,6 +131,42 @@ def test_ci_triggers_on_pull_requests_from_any_source_branch() -> None:
     )
 
 
+def test_release_workflow_setup_uv_steps_use_distinct_cache_suffixes() -> None:
+    """FRG-OSS-055: pushing a release tag triggers release.yml AND ci.yml
+    concurrently against the same commit. release.yml's own "test" and
+    "build" jobs also both run setup-uv. Without a distinct cache-suffix per
+    job, every setup-uv step shares the same default cache key, so whichever
+    job's cache-save loses the race logs a spurious "Failed to save: Unable
+    to reserve cache" on every release run. Each setup-uv step in
+    release.yml must carry its own ``cache-suffix`` input so no job depends
+    on winning a race against another.
+    """
+    workflow = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+
+    # One cache-suffix per astral-sh/setup-uv step, in step order.
+    suffixes = re.findall(
+        r"astral-sh/setup-uv@[0-9a-f]{40}[^\n]*\n(?:[ \t]+with:\n(?:[ \t]+\S.*\n)*)?",
+        workflow,
+    )
+    assert len(suffixes) == 2, (
+        f"expected exactly 2 astral-sh/setup-uv steps in release.yml, found {len(suffixes)}"
+    )
+
+    cache_suffixes = [
+        m.group(1)
+        for block in suffixes
+        for m in [re.search(r'cache-suffix:\s*"([^"]+)"', block)]
+        if m is not None
+    ]
+    assert len(cache_suffixes) == 2, (
+        "both astral-sh/setup-uv steps in release.yml must set a "
+        f"cache-suffix input; found {cache_suffixes!r} in:\n{workflow}"
+    )
+    assert len(set(cache_suffixes)) == 2, (
+        f"release.yml's setup-uv cache-suffix values must be distinct, got {cache_suffixes!r}"
+    )
+
+
 def test_release_and_sync_workflows_pin_actions_to_commit_shas() -> None:
     """Supply-chain hardening: the publish/sync workflows (which push to PyPI and
     open PRs) must pin every third-party action to a full 40-hex commit SHA, not a
