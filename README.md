@@ -22,11 +22,11 @@ and see — on your machine — how much you'd save by switching or routing mode
 uvx frugon analyze ./logs.jsonl
 
 # permanent install
-pipx install frugon
+uv tool install frugon          # or: pipx install frugon / pip install frugon
 frugon analyze ./logs.jsonl
 
 # for --measure (optional): samples real prompts through your own provider keys
-pip install 'frugon[measure]'
+uv tool install 'frugon[measure]'   # or: pip install 'frugon[measure]'
 frugon analyze ./logs.jsonl --measure
 ```
 
@@ -185,6 +185,62 @@ Based on [RouteLLM](https://github.com/lm-sys/RouteLLM)'s published research (LM
 | Hard reasoning / MMLU-heavy | ~30% |
 
 **Your actual number comes from your logs.** Frugon never inflates — it shows what the math says for your data.
+
+## Limitations
+
+Frugon volunteers its edges. A few things are worth stating plainly before you
+rely on a number.
+
+**`analyze` is an offline estimate.** The cost analysis reads your logs, prices
+them, and applies an easy/hard split heuristic without making a single model
+call. It never sees a candidate model's actual output, so "within tolerance" is a
+projection, not a measurement. The quality tiers come from LMArena and the savings
+bands come from RouteLLM research; both are population priors drawn from public
+leaderboards and studies. They describe how models tend to compare across many
+users, not a guarantee for your specific prompts. To turn the estimate into a
+measurement on your own traffic, run `--measure`, and `--measure --judge` to score
+it.
+
+**Sampling can miss the tail.** `--measure` and `--judge` grade a sample of your
+prompts, not every one. A rare or unusual case may never appear in the sample, and
+an average across the sample can hide a model that degrades badly on a small slice
+of hard inputs. Raise `--samples` to widen coverage, and re-run on a fresh sample
+to see whether the verdict holds.
+
+**A tie can hide a shared failure.** The judge is pairwise. It sees your current
+model's answer and the candidate's answer, anonymised as A and B in a randomised
+order, and it defaults to a tie unless one answer is clearly and materially better.
+That design removes label and position bias, but it also means two answers that
+fail the same way score as a tie: the judge is asked which answer is better, not
+whether either is correct on its own. A tie tells you the candidate is no worse
+than your current model, not that either one is right. When you need the ground
+truth on a prompt, read the sampled outputs yourself; `--measure` prints them side
+by side.
+
+**One draw does not measure variance.** Each sampled prompt is answered once, and
+Frugon sends no temperature setting, so your provider's default applies. A single
+answer cannot tell you how much a model's output varies from run to run, and a
+one-draw verdict can mislead on a model that is nondeterministic. Re-running
+`--measure` on a fresh sample is the manual way to check whether a verdict is
+stable.
+
+**Per-call analysis cannot see second-order cost.** Frugon prices the calls in
+your logs. It cannot see the cost a weak answer creates downstream: a follow-up
+call it triggers, a retry, or a human stepping in to review it. Retry attribution
+and human-review time are not in the logs, so a model that looks cheaper per call
+is not automatically cheaper once those effects are counted. Sampling real outputs
+with `--judge` is the closest built-in check on whether a cheaper model actually
+holds quality on your prompts.
+
+**On the judge, and on local models.** When the judge is one of the models it is
+scoring, its verdict is partly a self-assessment; Frugon detects this and prints a
+caution naming the affected models, and you can pass `--judge-model` to use an
+independent judge. A model served on your own machine works here too: it can be
+sampled as a candidate or named as the judge, keyless and local. A local model
+absent from the pricing table has its measurement cost flagged as unpriced rather
+than guessed.
+
+Your number is whatever your own logs and your own evaluation say.
 
 ## Is this you?
 

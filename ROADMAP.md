@@ -188,7 +188,7 @@ their own temp output so the autouse copy is never mutated.
 
 **Today (the limitation).** The `--demo` reconciliation tests verify the rendered
 saving % matches the total-basis figure, but the current demo fixture's
-total-basis (~34.83%) and baseline-basis (~34.95%) savings both round to 35%, so
+total-basis (~37.41%) and baseline-basis (~37.47%) savings both round to 37%, so
 the rendered string cannot by itself prove the report uses the total basis. The
 basis-confusion guard is therefore asserted at the figure-source level instead.
 
