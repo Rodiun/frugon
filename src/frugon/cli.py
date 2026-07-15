@@ -830,6 +830,30 @@ def analyze(
         )
         raise typer.Exit(code=1)
 
+    # Pure-argument prerequisite checks — grouped here, BEFORE any path/IO
+    # resolution, so an invocation mistake is reported on its own terms rather
+    # than masked by a downstream "log not found".  --judge and --judge-model
+    # both depend on --measure/--judge respectively; without the thing they
+    # configure they are silent no-ops, which is a fail-loud violation (the user
+    # believes they judged / chose a judge model when nothing did).
+    if judge and not measure:
+        rprint(
+            "[red]Error: --judge requires --measure "
+            "(judging grades sampled responses; there are no samples without "
+            "--measure).[/red]\n"
+            "[dim]Run: frugon analyze --measure --judge[/dim]"
+        )
+        raise typer.Exit(code=1)
+
+    if judge_model is not None and not judge:
+        rprint(
+            "[red]Error: --judge-model has no effect without --judge "
+            "(there is no judge to configure unless judging is enabled).[/red]\n"
+            "[dim]Run: frugon analyze --measure --judge --judge-model "
+            f"{judge_model}[/dim]"
+        )
+        raise typer.Exit(code=1)
+
     # Resolve the two per-surface preview limits ONCE from the display flags
     # (terminal for render_quality_terminal, report for the written report).  With
     # neither flag set these are the historical defaults, so default rendering is
@@ -866,15 +890,6 @@ def analyze(
     candidate_list: list[str] | None = None
     if candidates:
         candidate_list = [c.strip() for c in candidates.split(",") if c.strip()]
-
-    if judge and not measure:
-        rprint(
-            "[red]Error: --judge requires --measure "
-            "(judging grades sampled responses; there are no samples without "
-            "--measure).[/red]\n"
-            "[dim]Run: frugon analyze --measure --judge[/dim]"
-        )
-        raise typer.Exit(code=1)
 
     # --- Fail-fast prerequisite check for --measure / --judge -----------------
     # A measure run depends on the [measure] extra (LiteLLM) and the relevant

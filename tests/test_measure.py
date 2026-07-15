@@ -1698,3 +1698,31 @@ def test_analyze_judge_without_measure_exits_nonzero() -> None:
         f"Suggested invocation missing:\n{result.output}"
     )
     assert "Traceback" not in result.output
+
+
+def test_analyze_judge_model_without_judge_exits_nonzero() -> None:
+    """Arrange: --judge-model set but bare (no --judge).
+    Act: invoke analyze --demo --judge-model gpt-4o.
+    Assert: exits non-zero with a clear prerequisite message; no silent no-op.
+
+    Sibling of --judge-without---measure: --judge-model is only consumed when
+    judging is enabled, so setting it without --judge silently does nothing —
+    the same fail-loud violation. Detectable because --judge-model defaults to
+    None (unlike defaulted flags such as --samples/--concurrency).
+    """
+    from typer.testing import CliRunner
+
+    from frugon.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app, ["analyze", "--demo", "--judge-model", "gpt-4o", "--no-progress"]
+    )
+
+    assert result.exit_code != 0, (
+        f"Expected non-zero exit for --judge-model without --judge:\n{result.output}"
+    )
+    assert "--judge-model has no effect without --judge" in result.output, (
+        f"Prerequisite message missing:\n{result.output}"
+    )
+    assert "Traceback" not in result.output
