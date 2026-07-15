@@ -1674,3 +1674,27 @@ def test_analyze_measure_with_missing_key_exits_nonzero(
         f"Expected non-zero exit for missing key, got {result.exit_code}:\n{result.output}"
     )
     mock_litellm.completion.assert_not_called()
+
+
+def test_analyze_judge_without_measure_exits_nonzero() -> None:
+    """Arrange: bare --judge (no --measure).
+    Act: invoke analyze --demo --judge.
+    Assert: exits non-zero with a clear prerequisite message; no silent no-op.
+    """
+    from typer.testing import CliRunner
+
+    from frugon.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["analyze", "--demo", "--judge", "--no-progress"])
+
+    assert result.exit_code != 0, (
+        f"Expected non-zero exit for --judge without --measure:\n{result.output}"
+    )
+    assert "--judge requires --measure" in result.output, (
+        f"Prerequisite message missing:\n{result.output}"
+    )
+    assert "frugon analyze --measure --judge" in result.output, (
+        f"Suggested invocation missing:\n{result.output}"
+    )
+    assert "Traceback" not in result.output

@@ -867,6 +867,15 @@ def analyze(
     if candidates:
         candidate_list = [c.strip() for c in candidates.split(",") if c.strip()]
 
+    if judge and not measure:
+        rprint(
+            "[red]Error: --judge requires --measure "
+            "(judging grades sampled responses; there are no samples without "
+            "--measure).[/red]\n"
+            "[dim]Run: frugon analyze --measure --judge[/dim]"
+        )
+        raise typer.Exit(code=1)
+
     # --- Fail-fast prerequisite check for --measure / --judge -----------------
     # A measure run depends on the [measure] extra (LiteLLM) and the relevant
     # provider API keys.  Verifying those AFTER the full cost analysis means the
