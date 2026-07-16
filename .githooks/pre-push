@@ -1,12 +1,23 @@
 #!/usr/bin/env bash
-# Pre-push gate: run the full local CI suite and BLOCK the push if it fails.
-# This is what keeps origin (and the public CI badge) green.
+# Pre-push gate: check attribution, then run the full local CI suite, and BLOCK
+# the push if either fails. This is what keeps origin (and the public CI badge)
+# green — and keeps the public Contributors list to the people who meant to be
+# on it.
+#
+# Attribution runs FIRST and takes about a second; CI takes minutes. No sense
+# burning the CI wait only to reject on a commit trailer at the end of it.
 #
 # Enable once per clone:   git config core.hooksPath .githooks
 # Bypass only for genuine emergencies (e.g. a docs-only push):
 #                          git push --no-verify
 set -euo pipefail
 
+ROOT="$(git rev-parse --show-toplevel)"
+
+# Reads the pushed refs from stdin, which git hands to this hook.
+echo "── pre-push: checking commit attribution ──"
+"$ROOT/scripts/check-commit-attribution.sh"
+
 echo "── pre-push: running local CI gate (mirrors ci.yml) ──"
-"$(git rev-parse --show-toplevel)/scripts/ci-local.sh"
+"$ROOT/scripts/ci-local.sh"
 echo "── pre-push: gate green, allowing push ──"

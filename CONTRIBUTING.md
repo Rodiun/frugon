@@ -20,7 +20,15 @@ source .venv/bin/activate    # macOS / Linux
 
 # Install the project in editable mode with dev dependencies
 pip install -e ".[dev]"
+
+# Enable the repo's git hooks (once per clone)
+git config core.hooksPath .githooks
 ```
+
+The hooks run the test suite before a push, and check that each commit's author,
+committer, and `Co-authored-by:` trailers are the people who meant to be credited —
+trailers are easy for an editor or agent to add on your behalf, and they land on the
+repository's public contributors list.
 
 ---
 

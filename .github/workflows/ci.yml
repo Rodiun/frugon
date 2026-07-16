@@ -15,6 +15,37 @@ permissions:
   contents: read
 
 jobs:
+  attribution:
+    name: "Commit attribution"
+    runs-on: ubuntu-latest
+    # Backstop for the .githooks/pre-push check, which only runs in clones that
+    # have set core.hooksPath. On a pull_request this gates the merge. On a push
+    # to main it is DETECTION, not prevention: history here is linear and pushed
+    # directly, so by the time this runs the commits are already public and the
+    # job can only turn them red. That is still the difference between noticing
+    # in minutes and noticing weeks later in the GitHub UI.
+    #
+    # Skipped on a force-push: rewriting history means github.event.before is no
+    # longer an ancestor of .after, so the range will not resolve and the guard
+    # fails closed (by design). Without this, a push that rewrites history to
+    # REMOVE a bad trailer would be failed by the very check that asked for it.
+    if: github.event.forced != true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # The check walks a commit range, so it needs the history, not a
+          # single-commit shallow checkout.
+          fetch-depth: 0
+
+      - name: Check commit attribution
+        env:
+          RANGE: >-
+            ${{ github.event_name == 'pull_request'
+                && format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha)
+                || format('{0}..{1}', github.event.before, github.event.after) }}
+        run: ./scripts/check-commit-attribution.sh "$RANGE"
+
   test:
     name: "Python ${{ matrix.python-version }} / ${{ matrix.os }}"
     runs-on: "${{ matrix.os }}"
