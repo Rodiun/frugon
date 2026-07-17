@@ -159,8 +159,9 @@ def _escalation_detail(suggestion: EscalationSuggestion, current_model: str) -> 
     )
 
 # The two load-bearing caveats kept in the default terminal view (CLI redesign
-# point 3).  Everything else — the wholesale upper bound, the easy/hard heuristic
-# explanation, and the automated-routing upsell — moves to --verbose.
+# point 3).  Everything else — the wholesale upper bound and the easy/hard
+# heuristic explanation — moves to --verbose.  The automated-routing upsell
+# stays in the shared footer, rendered in both default and --verbose views.
 # The quality caveat is rendered as TWO deliberate lines: the assertion, then
 # the call to action on its own line beneath it.  The break is forced (not left
 # to soft-wrap) so the "run --measure …" instruction always reads as a distinct,
@@ -687,8 +688,9 @@ def render_terminal(
     When ``verbose=True``, each view appends the supporting detail that the
     default (pared-down) view moves out of the way: the per-model cost table plus
     a Notes block (the split's easy/hard heuristic and wholesale upper-bound, or —
-    on the wholesale view — a pointer back to the conservative split), and the
-    automated-routing upsell.
+    on the wholesale view — a pointer back to the conservative split).  The
+    automated-routing upsell is not part of this supporting detail — it lives in
+    the shared footer, rendered once regardless of ``verbose``.
 
     *judged_models* — the models this run will judge (the explicit ``--candidates``
     under ``--measure --judge``, whose quality verdict renders in the section
@@ -1169,8 +1171,8 @@ def _render_split_terminal(
     if verbose:
         _render_cost_by_model_table(result)
         # Blank line: the "Cost by model" table and the supporting notes below
-        # (Upper bound / Method / Automate) are DISTINCT concerns — separate them
-        # so the notes don't read as extra rows of the cost table.
+        # (Upper bound / Method) are DISTINCT concerns — separate them so the
+        # notes don't read as extra rows of the cost table.
         rprint("")
         _render_split_verbose(result, split)
 
@@ -2044,9 +2046,11 @@ def _render_log_span_row(result: AnalysisResult) -> None:
 def _render_split_verbose(result: AnalysisResult, split: SplitRouting) -> None:
     """Verbose-only supporting detail moved out of the default split view.
 
-    Carries the wholesale upper-bound, the easy/hard heuristic explanation, and
-    the automated-routing upsell — the material the pared-down default view sends
-    here so the headline reads confident, not defensive (CLI redesign point 3).
+    Carries the wholesale upper-bound and the easy/hard heuristic explanation —
+    the material the pared-down default view sends here so the headline reads
+    confident, not defensive (CLI redesign point 3).  The automated-routing
+    upsell lives ONLY in the shared footer (:func:`_render_footer_core`), which
+    always follows this block — duplicating it here read as the site CTA twice.
     """
     # Group header — mirrors the "Cost by model" table title so the notes read
     # as their own labelled section, not orphaned rows trailing the table.
@@ -2056,7 +2060,7 @@ def _render_split_verbose(result: AnalysisResult, split: SplitRouting) -> None:
     # Accounting/Prices block, wrapping with a hanging indent under the body —
     # continuations never bleed back to the left margin.
 
-    # Order (Item 7): Upper bound -> Log span -> Method -> Automate.  The
+    # Order (Item 7): Upper bound -> Log span -> Method.  The
     # Upper-bound decision note leads; the Log-span disclosure follows it.
     # Wholesale upper-bound — the larger, less-conservative full-swap figure.
     # The quoted split percentage IS the panel hero's percent: both read
@@ -2102,14 +2106,6 @@ def _render_split_verbose(result: AnalysisResult, split: SplitRouting) -> None:
         hang=_LABEL_HANG,
         prefix=_label_prefix("Method"),
     )
-
-    # Automated-routing upsell.
-    automate = Text(
-        "frugon can route every call automatically and hold the savings for you → ",
-        style="dim",
-    )
-    automate.append("https://frugon.rodiun.io", style=BRAND_CYAN)
-    _print_hanging(automate, hang=_LABEL_HANG, prefix=_label_prefix("Automate"))
 
     rprint("")
 
@@ -2409,7 +2405,10 @@ def _render_wholesale_verbose(result: AnalysisResult) -> None:
     Wholesale IS the upper bound (every call swapped), so there is no "Upper
     bound" note here — instead a pointer BACK to the conservative split, which
     routes only the easy calls and keeps quality changes small (the default view).
-    The method note (the offline list-price arithmetic) applies and is kept.
+    The method note (the offline list-price arithmetic) applies and is kept.  The
+    automated-routing upsell lives ONLY in the shared footer
+    (:func:`_render_footer_core`), which always follows this block —
+    duplicating it here read as the site CTA twice.
     """
     rprint(Text("  Notes", style="dim"))
 
@@ -2451,14 +2450,6 @@ def _render_wholesale_verbose(result: AnalysisResult) -> None:
             hang=_LABEL_HANG,
             prefix=_label_prefix("Pool"),
         )
-
-    # Automated-routing upsell — same as the split verbose block.
-    automate = Text(
-        "frugon can route every call automatically and hold the savings for you → ",
-        style="dim",
-    )
-    automate.append("https://frugon.rodiun.io", style=BRAND_CYAN)
-    _print_hanging(automate, hang=_LABEL_HANG, prefix=_label_prefix("Automate"))
 
     rprint("")
 

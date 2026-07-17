@@ -353,6 +353,19 @@ class TestWholesaleVerbose:
         assert "Cost by model" not in out
         assert "Notes" not in out
 
+    def test_verbose_carries_the_upsell_exactly_once(self) -> None:
+        """--verbose must not duplicate the site CTA: the Notes block used to
+        carry its own 'Automate' row on top of the shared footer's upsell line.
+        The footer is the ONE place it belongs, in both default and --verbose."""
+        text = _render_to_text(
+            _result_wholesale(used_default_pool=True, candidate_pool_size=5),
+            verbose=True,
+        )
+        lines = [ln.rstrip() for ln in text.splitlines()]
+        upsell = [i for i, ln in enumerate(lines) if FUNNEL_URL in ln]
+        assert len(upsell) == 1, f"expected one upsell line, got {len(upsell)}"
+        assert "Automate" not in text
+
 
 class TestWholesaleNoCandidate:
     """Honest fallback when no cheaper candidate exists — no phantom saving."""
