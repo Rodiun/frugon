@@ -142,16 +142,18 @@ class TestTerminalSplit:
         total after routing the baseline's easy calls (0.0676 - (0.0650 - 0.0439)
         = 0.0465 → printed $0.05), so the printed SAVING is $0.07 - $0.05 = $0.02
         and the percent is derived from those rounded components: $0.02 / $0.07 =
-        28.6% — verifiable straight from the printed figures, the SAME figure the
-        HTML/MD reports now show (every surface shares the one rounded source
-        _split_report_figures, so no surface can contradict another).
+        28.5714…%, floored (never rounded up) to 28.5% — verifiable straight from
+        the printed figures, the SAME figure the HTML/MD reports now show (every
+        surface shares the one rounded source _split_report_figures, so no
+        surface can contradict another).
         """
         render_terminal(_result_with_split())
         out = " ".join(capsys.readouterr().out.split())
         assert "SAVING" in out
         # Saving over the TOTAL current spend, derived from the 2-dp-rounded
-        # dollars: ($0.07 − $0.05) / $0.07 = 28.6% (1-dp).
-        assert "28.6% lower" in out
+        # dollars: ($0.07 − $0.05) / $0.07 = 28.5714…%, floored to 28.5% (1-dp) —
+        # ROUND_HALF_UP would overstate this as 28.6%.
+        assert "28.5% lower" in out
         # Current and new-spend figures both appear (full _fmt_usd precision).
         assert "Current spend" in out
         assert "New spend" in out
@@ -547,9 +549,10 @@ class TestHtmlSplit:
         assert "gpt-4o-mini" in html
         assert "within tolerance" in html
         # Total-basis saving derived from the 2-dp-rounded dollars
-        # ($0.07 − $0.05) / $0.07 = 28.6% (1-dp), not the unrounded 31.2% or the
-        # retired baseline-only 32%.
-        assert "28.6%" in html
+        # ($0.07 − $0.05) / $0.07 = 28.5714…%, floored (never rounded up) to
+        # 28.5% (1-dp) — not the unrounded 31.2%, the retired baseline-only 32%,
+        # nor the ROUND_HALF_UP-overstated 28.6%.
+        assert "28.5%" in html
         assert SPLIT_CAVEAT.split(".")[0] in html
 
     def test_html_v2_split_renders_routing_plan(self, tmp_path: Path) -> None:
@@ -563,9 +566,10 @@ class TestHtmlSplit:
         assert "gpt-4o-mini" in html
         assert "within tolerance" in html
         # Total-basis saving derived from the 2-dp-rounded dollars
-        # ($0.07 − $0.05) / $0.07 = 28.6% (1-dp), not the unrounded 31.2% or the
-        # retired baseline-only 32%.
-        assert "28.6%" in html
+        # ($0.07 − $0.05) / $0.07 = 28.5714…%, floored (never rounded up) to
+        # 28.5% (1-dp) — not the unrounded 31.2%, the retired baseline-only 32%,
+        # nor the ROUND_HALF_UP-overstated 28.6%.
+        assert "28.5%" in html
 
     def test_html_v2_split_routing_table_column_law(self, tmp_path: Path) -> None:
         """Assert: the routing-plan table carries the SIX-column law with a share bar.
@@ -671,9 +675,10 @@ class TestMarkdownSplit:
         assert "Blended" in md
         assert "gpt-4o-mini" in md
         # Total-basis saving derived from the 2-dp-rounded dollars
-        # ($0.07 − $0.05) / $0.07 = 28.6% (1-dp), not the unrounded 31.2% or the
-        # retired baseline-only 32%.
-        assert "28.6%" in md
+        # ($0.07 − $0.05) / $0.07 = 28.5714…%, floored (never rounded up) to
+        # 28.5% (1-dp) — not the unrounded 31.2%, the retired baseline-only 32%,
+        # nor the ROUND_HALF_UP-overstated 28.6%.
+        assert "28.5%" in md
 
     def test_markdown_v2_split_shape(self, tmp_path: Path) -> None:
         out = tmp_path / "r.md"

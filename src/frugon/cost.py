@@ -23,7 +23,7 @@ import json
 import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -887,8 +887,25 @@ def _display_pct(pct: Decimal) -> Decimal:
     would be provably false the moment two candidates print the identical
     percent but differ in the 5th decimal place (the exact defect this
     function exists to close).
+
+    Floors (truncates toward zero) a positive *pct* instead of rounding it,
+    so the displayed saving is never higher than the exact computed value —
+    the roadmap promise "Saving-percent display — floor, never round up"
+    (49.96% must print "49.9%", not "50.0%"). Zero and negative values (no
+    saving, or a cost increase) keep ROUND_HALF_UP: flooring only guards
+    against overstating a SAVING, so it must not also make a displayed
+    increase look smaller by rounding it toward zero.
+
+    Reconciling-invariant note: when *pct* is derived from already-rounded
+    dollar components (``saved / current * 100`` on the printed Current/New
+    figures — see ``report._reconciled_delta_pct`` / ``_split_report_figures``),
+    a floored result is always <= that exact ratio, so ``SAVING == Current -
+    New`` still holds on the printed dollars and this function only ever
+    makes the adjacent printed PERCENT more conservative, never inconsistent
+    with it.
     """
-    return pct.quantize(_DISPLAY_PCT_QUANTUM, rounding=ROUND_HALF_UP)
+    rounding = ROUND_DOWN if pct > Decimal("0") else ROUND_HALF_UP
+    return pct.quantize(_DISPLAY_PCT_QUANTUM, rounding=rounding)
 
 
 def _select_cheapest_eligible(
