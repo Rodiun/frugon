@@ -304,7 +304,10 @@ def _baseline_failed_result() -> MeasureResult:
         Comparison(
             record=_record(f"prompt {i}"),
             current_output=SampledOutput(
-                "gpt-4-turbo", "", error="[rate limited — 429]"
+                "gpt-4-turbo",
+                "",
+                error="[rate limited — 429]",
+                error_cause="rate_limit",
             ),
             candidate_outputs=[SampledOutput("gpt-4o-mini", f"candidate answer {i}")],
             verdicts=["error"],
@@ -331,8 +334,84 @@ def test_tier1_synthesis_baseline_failed_blames_current_model() -> None:
     # The honest message names the CURRENT model as the thing that failed.
     assert "Could not verify" in out, out
     assert "your current model (gpt-4-turbo) failed to sample" in out, out
+    assert "rate limited (retry later)" in out, out
     # It must NOT wrongly imply the candidate failed.
     assert "every gpt-4o-mini comparison errored" not in out, out
+
+
+def test_tier1_synthesis_baseline_quota_failure_names_billing() -> None:
+    """Baseline quota exhaustion surfaces billing-specific synthesis, not generic."""
+    comparisons = [
+        Comparison(
+            record=_record(f"prompt {i}"),
+            current_output=SampledOutput(
+                "gpt-4-turbo",
+                "",
+                error=(
+                    "[quota exceeded — check billing] — "
+                    "You exceeded your current quota"
+                ),
+                error_cause="quota",
+            ),
+            candidate_outputs=[SampledOutput("gpt-4o-mini", f"candidate answer {i}")],
+            verdicts=["error"],
+        )
+        for i in range(3)
+    ]
+    result = MeasureResult(
+        samples_requested=3,
+        samples_taken=3,
+        current_model="gpt-4-turbo",
+        candidates=["gpt-4o-mini"],
+        comparisons=comparisons,
+        tier1_tallies=[
+            Tier1Tally(candidate="gpt-4o-mini", wins=0, losses=0, ties=0, errors=3)
+        ],
+    )
+    out = _capture(result)
+    assert "quota exceeded (check billing)" in out, out
+    assert "rate limit or API error" not in out, out
+
+
+def test_tier1_synthesis_rate_limit_with_quota_text_stays_rate_limit() -> None:
+    """A throttle whose provider text mentions "quota" stays a rate-limit verdict.
+
+    Regression: the string-scan implementation re-parsed the rendered cell, so
+    a genuine throttle whose appended provider message contained "quota
+    exceeded" was misreported as a billing problem.  Synthesis must consume
+    the TYPED cause — provider text is arbitrary and can contain the very
+    phrases a string scan would key on.
+    """
+    comparisons = [
+        Comparison(
+            record=_record(f"prompt {i}"),
+            current_output=SampledOutput(
+                "gpt-4-turbo",
+                "",
+                error=(
+                    "[rate limited — retry later] — Rate limit reached. Your "
+                    "quota exceeded the burst allowance; retry shortly."
+                ),
+                error_cause="rate_limit",
+            ),
+            candidate_outputs=[SampledOutput("gpt-4o-mini", f"candidate answer {i}")],
+            verdicts=["error"],
+        )
+        for i in range(3)
+    ]
+    result = MeasureResult(
+        samples_requested=3,
+        samples_taken=3,
+        current_model="gpt-4-turbo",
+        candidates=["gpt-4o-mini"],
+        comparisons=comparisons,
+        tier1_tallies=[
+            Tier1Tally(candidate="gpt-4o-mini", wins=0, losses=0, ties=0, errors=3)
+        ],
+    )
+    out = _capture(result)
+    assert "rate limited (retry later)" in out, out
+    assert "quota exceeded (check billing)" not in out, out
 
 
 def test_tier1_baseline_failed_per_prompt_reads_no_comparison_not_error() -> None:

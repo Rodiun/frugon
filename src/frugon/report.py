@@ -2651,11 +2651,29 @@ def _baseline_all_errored(measure_result: MeasureResult) -> bool:
     return all(c.current_output.error is not None for c in comps)
 
 
+def _baseline_sampling_failure_phrase(measure_result: MeasureResult) -> str:
+    """Most specific failure phrase from the baseline's TYPED failure causes.
+
+    Reads ``error_cause`` (never the rendered ``error`` cell — its appended
+    provider text is arbitrary and could satisfy a string scan for the wrong
+    cause) from every errored baseline sample in *measure_result*.
+    """
+    from frugon.measure import summarize_sampling_failures
+
+    causes = [
+        comp.current_output.error_cause
+        for comp in measure_result.comparisons
+        if comp.current_output.error
+    ]
+    return summarize_sampling_failures(causes)
+
+
 def _classify_verdict(
     tally: Tier1Tally,
     current_model: str,
     *,
     baseline_all_errored: bool = False,
+    sampling_failure_phrase: str | None = None,
     result: AnalysisResult | None = None,
 ) -> tuple[str, str]:
     """Classify one judged tally into a ``(state, plain_text)`` pair.
@@ -2667,7 +2685,10 @@ def _classify_verdict(
     here is what guarantees the terminal and the reports never diverge.
 
     *baseline_all_errored* is True when the CURRENT/baseline model itself failed
-    to sample on every sampled prompt (rate limit / API error).  In that state a
+    to sample on every sampled prompt (*sampling_failure_phrase* names the
+    cause — quota, auth, or a generic rate-limit/API fault; ``None`` resolves
+    to the generic fallback lazily, keeping this module importable without
+    ``frugon.measure`` for the offline path).  In that state a
     "every <candidate> comparison errored" message wrongly implies the candidate
     failed, so the classifier emits the baseline-failed sentence instead — the
     honest read is that there was nothing to compare against.
@@ -2682,10 +2703,17 @@ def _classify_verdict(
     held = tally.wins + tally.ties
     if scored == 0:
         if baseline_all_errored:
+            if sampling_failure_phrase is None:
+                # Lazy: only the measure path reaches this branch, so the
+                # module-level lazy-import contract (report imports without
+                # frugon.measure) is preserved.
+                from frugon.measure import GENERIC_SAMPLING_FAILURE_PHRASE
+
+                sampling_failure_phrase = GENERIC_SAMPLING_FAILURE_PHRASE
             return (
                 _VERDICT_BASELINE_FAILED,
                 f"Could not verify — your current model ({current_model}) failed "
-                "to sample (rate limit or API error), so there was nothing to "
+                f"to sample ({sampling_failure_phrase}), so there was nothing to "
                 f"compare against. Retry, or check {current_model} access.",
             )
         return (
@@ -2779,10 +2807,20 @@ def _render_tier1_synthesis(
     # the whole run and shared by every tally's verdict so the "current model
     # failed" reading is consistent across candidates and surfaces.
     baseline_failed = _baseline_all_errored(measure_result)
+    # None when the baseline sampled fine — the phrase is only consumed in
+    # the baseline-failed verdict, so nothing needs the generic fallback here
+    # (and _classify_verdict resolves it lazily if it ever does).
+    failure_phrase = (
+        _baseline_sampling_failure_phrase(measure_result) if baseline_failed else None
+    )
     rprint("")  # one blank line separating the table from its reading
     for tally in tallies:
         state, _text = _classify_verdict(
-            tally, current, baseline_all_errored=baseline_failed, result=result
+            tally,
+            current,
+            baseline_all_errored=baseline_failed,
+            sampling_failure_phrase=failure_phrase,
+            result=result,
         )
         # Each branch keeps its bespoke Rich markup (bold spans on the key
         # figures) for the terminal's richer styling; the verdict it renders is
@@ -2801,8 +2839,8 @@ def _render_tier1_synthesis(
             # so it is not re-prefixed with "Estimate".
             rprint(
                 f"[{CAUTION_AMBER}]{status} — your current model "
-                f"([bold]{current}[/bold]) failed to sample (rate limit or API "
-                "error), so there was nothing to compare against. "
+                f"([bold]{current}[/bold]) failed to sample ({failure_phrase}), "
+                "so there was nothing to compare against. "
                 f"Retry, or check {current} access.[/{CAUTION_AMBER}]"
             )
         elif state == _VERDICT_NOT_VERIFIED:
@@ -4046,11 +4084,17 @@ def _quality_section_md(
         # synthesis escalates to the next rung up instead of the dead-end
         # "keep these on the baseline" line — verbatim the terminal's wording.
         md_baseline_failed = _baseline_all_errored(measure_result)
+        md_failure_phrase = (
+            _baseline_sampling_failure_phrase(measure_result)
+            if md_baseline_failed
+            else None  # unused unless the baseline failed; lazy fallback
+        )
         for tally in measure_result.tier1_tallies:
             state, text = _classify_verdict(
                 tally,
                 current,
                 baseline_all_errored=md_baseline_failed,
+                sampling_failure_phrase=md_failure_phrase,
                 result=result,
             )
             mark = "⚠ " if state in _VERDICT_CAUTION_STATES else ""
@@ -4334,11 +4378,17 @@ def _quality_section_html(
         # small-sample nudge, when applicable, follows in a dim line.
         current_model = measure_result.current_model
         html_baseline_failed = _baseline_all_errored(measure_result)
+        html_failure_phrase = (
+            _baseline_sampling_failure_phrase(measure_result)
+            if html_baseline_failed
+            else None  # unused unless the baseline failed; lazy fallback
+        )
         for tally in measure_result.tier1_tallies:
             state, text = _classify_verdict(
                 tally,
                 current_model,
                 baseline_all_errored=html_baseline_failed,
+                sampling_failure_phrase=html_failure_phrase,
                 result=result,
             )
             cls = "caution" if state in _VERDICT_CAUTION_STATES else "neutral"

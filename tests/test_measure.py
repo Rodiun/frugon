@@ -17,18 +17,23 @@ import pytest
 
 from frugon.cost import LogRecord
 from frugon.measure import (
+    _PROVIDER_MESSAGE_MAX_CHARS,
     Comparison,
+    MeasureResult,
     MissingProviderKeyError,
     SampledOutput,
     Tier1Tally,
     _call_model,
     _check_provider_keys,
+    _classify_failure,
     _dedup_key,
     _friendly_cell,
     _judge_pair,
     _required_key_for_model,
+    _response_error_code,
     run_measure,
     sample_records,
+    summarize_sampling_failures,
 )
 
 # ---------------------------------------------------------------------------
@@ -379,7 +384,7 @@ def test_call_model_authentication_error_returns_friendly_cell() -> None:
     """
 
     class FakeAuthError(Exception):
-        pass
+        message = "litellm.AuthenticationError: No key provided"
 
     FakeAuthError.__name__ = "AuthenticationError"
 
@@ -389,6 +394,8 @@ def test_call_model_authentication_error_returns_friendly_cell() -> None:
     out = _call_model(mock_litellm, "gpt-4o-mini", messages)
     assert out.error is not None
     assert "auth failed" in out.error
+    assert "No key provided" in out.error
+    assert out.error_cause == "auth"
     assert out.content == ""
 
 
@@ -1326,24 +1333,517 @@ def test_friendly_cell_not_found_error() -> None:
 
 def test_friendly_cell_authentication_error() -> None:
     """Arrange: exception with AuthenticationError in its type name.
-    Assert: cell mentions 'auth failed'.
+    Assert: cell mentions auth failure and includes the provider message.
     """
 
     class AuthenticationError(Exception):
-        pass
+        message = "litellm.AuthenticationError: Incorrect API key provided"
 
     assert "auth failed" in _friendly_cell(AuthenticationError("x"))
+    assert "Incorrect API key provided" in _friendly_cell(AuthenticationError("x"))
 
 
 def test_friendly_cell_rate_limit_error() -> None:
-    """Arrange: exception with RateLimitError in its type name.
-    Assert: cell mentions 'rate limited'.
+    """Arrange: exception with RateLimitError in its type name (not quota).
+    Assert: cell mentions rate limited and includes the provider message.
     """
 
     class RateLimitError(Exception):
-        pass
+        message = "litellm.RateLimitError: Rate limit reached for requests"
 
-    assert "rate limited" in _friendly_cell(RateLimitError("x"))
+    cell = _friendly_cell(RateLimitError("x"))
+    assert "rate limited" in cell
+    assert "quota exceeded" not in cell
+    assert "Rate limit reached for requests" in cell
+
+
+def test_friendly_cell_quota_exceeded_on_rate_limit_error() -> None:
+    """Arrange: RateLimitError whose provider message signals quota exhaustion.
+    Assert: cell says quota exceeded with billing hint, not generic rate limit.
+    """
+    from litellm.exceptions import RateLimitError
+
+    exc = RateLimitError(
+        "You exceeded your current quota, please check your plan and billing details.",
+        llm_provider="openai",
+        model="gpt-4o",
+    )
+    assert _classify_failure(exc) == "quota"
+    cell = _friendly_cell(exc)
+    assert "quota exceeded" in cell
+    assert "check billing" in cell
+    assert "You exceeded your current quota" in cell
+    assert "rate limited" not in cell
+
+
+def test_friendly_cell_quota_detected_via_structured_response_code() -> None:
+    """Arrange: RateLimitError with insufficient_quota in the response body.
+    Assert: classified as quota even when the message omits the word 'quota'.
+    """
+
+    class RateLimitError(Exception):
+        message = "litellm.RateLimitError: Billing hard limit reached"
+
+        def __init__(self) -> None:
+            self.response = _FakeProviderResponse(
+                {"error": {"code": "insufficient_quota", "message": "Hard limit"}}
+            )
+
+    class _FakeProviderResponse:
+        def __init__(self, body: dict[str, object]) -> None:
+            self._body = body
+
+        def json(self) -> dict[str, object]:
+            return self._body
+
+    exc = RateLimitError()
+    assert _classify_failure(exc) == "quota"
+    cell = _friendly_cell(exc)
+    assert "quota exceeded" in cell
+
+
+def test_friendly_cell_anthropic_credit_exhaustion_maps_to_quota() -> None:
+    """Arrange: Anthropic credit exhaustion — HTTP 400 BadRequestError, not 429.
+    Assert: classified as quota with the billing hint, never the misleading
+    '[bad request — check model name and parameters]' cell.
+    """
+    from litellm.exceptions import BadRequestError
+
+    exc = BadRequestError(
+        message=(
+            "Your credit balance is too low to access the Anthropic API. "
+            "Please go to Plans & Billing to upgrade or purchase credits."
+        ),
+        llm_provider="anthropic",
+        model="claude-sonnet-4-5",
+    )
+    assert _classify_failure(exc) == "quota"
+    cell = _friendly_cell(exc)
+    assert "quota exceeded" in cell
+    assert "check billing" in cell
+    assert "credit balance is too low" in cell
+    assert "bad request" not in cell
+
+
+def test_friendly_cell_plain_bad_request_stays_bad_request() -> None:
+    """Arrange: a genuine 400 (bad model name) with no billing signal.
+    Assert: keeps the bad-request cell — only the narrow credit-exhaustion
+    signals upgrade a BadRequestError to a quota verdict.
+    """
+    from litellm.exceptions import BadRequestError
+
+    exc = BadRequestError(
+        message="Invalid model name passed in model=gpt-nope",
+        llm_provider="openai",
+        model="gpt-nope",
+    )
+    assert _classify_failure(exc) == "other"
+    assert "bad request" in _friendly_cell(exc)
+
+
+def test_friendly_cell_anthropic_auth_failure_routes_to_auth() -> None:
+    """Arrange: Anthropic 401 — litellm raises AuthenticationError.
+    Assert: pinned to the auth branch (type-first detection, no provider
+    special-casing needed).
+    """
+    from litellm.exceptions import AuthenticationError
+
+    exc = AuthenticationError(
+        message="invalid x-api-key",
+        llm_provider="anthropic",
+        model="claude-sonnet-4-5",
+    )
+    assert _classify_failure(exc) == "auth"
+    assert "auth failed" in _friendly_cell(exc)
+
+
+# ---------------------------------------------------------------------------
+# §5 privacy — the provider detail line is redacted and capped by construction
+# ---------------------------------------------------------------------------
+
+
+def test_provider_message_redacts_api_key_and_url() -> None:
+    """Arrange: auth message carrying a (masked) API key and a docs URL.
+    Assert: neither the key fragment nor the URL survives into the cell (§5).
+    """
+
+    class AuthenticationError(Exception):
+        message = (
+            "litellm.AuthenticationError: OpenAIException - Incorrect API key "
+            "provided: sk-proj-Ab3xK9mQ2v************mZ7Q. You can find your "
+            "API key at https://platform.openai.com/account/api-keys."
+        )
+
+    cell = _friendly_cell(AuthenticationError("x"))
+    assert "auth failed" in cell
+    assert "sk-proj" not in cell
+    assert "mZ7Q" not in cell
+    assert "http" not in cell
+    assert "[redacted]" in cell
+
+
+def test_provider_message_redacts_org_id() -> None:
+    """Arrange: rate-limit message echoing the account's organization id.
+    Assert: the org id never survives into the cell (§5).
+    """
+
+    class RateLimitError(Exception):
+        message = (
+            "litellm.RateLimitError: Rate limit reached for gpt-4o in "
+            "organization org-9aQxK2mVrTb7Lz4H on requests per min (RPM): "
+            "Limit 500, Used 500."
+        )
+
+    cell = _friendly_cell(RateLimitError("x"))
+    assert "rate limited" in cell
+    assert "org-9aQxK2mVrTb7Lz4H" not in cell
+    assert "[redacted]" in cell
+
+
+def test_provider_message_redacts_anthropic_key_shape() -> None:
+    """Arrange: auth message echoing an Anthropic-shaped key (sk-ant-…).
+    Assert: the key never survives into the cell (§5).
+    """
+
+    class AuthenticationError(Exception):
+        message = "litellm.AuthenticationError: invalid x-api-key: sk-ant-api03-AbCdEf123"
+
+    cell = _friendly_cell(AuthenticationError("x"))
+    assert "auth failed" in cell
+    assert "sk-ant" not in cell
+    assert "[redacted]" in cell
+
+
+def test_provider_message_length_capped() -> None:
+    """Arrange: pathologically long provider message.
+    Assert: the attached detail is hard-capped — 'short' holds by construction.
+    """
+
+    class RateLimitError(Exception):
+        message = "litellm.RateLimitError: " + "Rate limit reached. " * 40
+
+    cell = _friendly_cell(RateLimitError("x"))
+    headline = "[rate limited — retry later] — "
+    assert len(cell) <= len(headline) + _PROVIDER_MESSAGE_MAX_CHARS
+    assert cell.endswith("…")
+
+
+def test_provider_message_first_line_only() -> None:
+    """Arrange: multi-line provider message (JSON dump after the first line).
+    Assert: only the first line reaches the cell — no embedded newlines.
+    """
+
+    class RateLimitError(Exception):
+        message = "litellm.RateLimitError: Too many requests\n{'debug': 'dump'}\nmore"
+
+    cell = _friendly_cell(RateLimitError("x"))
+    assert "rate limited" in cell
+    assert "Too many requests" in cell
+    assert "debug" not in cell
+    assert "\n" not in cell
+
+
+def test_sampling_error_detail_redacted_on_report_surfaces() -> None:
+    """Arrange: a comparison whose candidate error cell came from a provider
+    message carrying a key, an org id, and a URL — the real pipeline step
+    (_friendly_cell) builds the cell.
+    Assert: the markdown and HTML report sections carry the redacted cell and
+    never the key fragment / org id / URL (§5 — report files get shared).
+    """
+    from frugon.report import _quality_section_html, _quality_section_md
+
+    class AuthenticationError(Exception):
+        message = (
+            "litellm.AuthenticationError: Incorrect API key provided: "
+            "sk-proj-Ab3xK9mQ2v************mZ7Q (org org-9aQxK2mVrTb7Lz4H). "
+            "See https://platform.openai.com/account/api-keys."
+        )
+
+    cell = _friendly_cell(AuthenticationError("x"))
+    record = LogRecord(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": "Classify this ticket"}],
+        completion_text="ok",
+        prompt_tokens=10,
+        completion_tokens=5,
+        timestamp=None,
+    )
+    comp = Comparison(
+        record=record,
+        current_output=SampledOutput(model="gpt-4o", content="A"),
+        candidate_outputs=[
+            SampledOutput(
+                model="gpt-4o-mini", content="", error=cell, error_cause="auth"
+            )
+        ],
+    )
+    mr = MeasureResult(
+        samples_requested=1,
+        samples_taken=1,
+        current_model="gpt-4o",
+        candidates=["gpt-4o-mini"],
+        comparisons=[comp],
+        tier1_tallies=None,
+    )
+    md = "\n".join(_quality_section_md(mr))
+    html = _quality_section_html(mr, style="v1")
+    for surface in (md, html):
+        assert "auth failed" in surface
+        assert "sk-proj" not in surface
+        assert "mZ7Q" not in surface
+        assert "org-9aQxK2mVrTb7Lz4H" not in surface
+        assert "platform.openai.com" not in surface
+
+
+def test_provider_message_redacts_bare_env_key_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Arrange: a bare random-string key (Mistral — no matchable prefix) set in
+    the env var the sampler authenticates with, echoed verbatim by the provider.
+    Assert: the exact value never survives into the cell (§5).  Shape patterns
+    cannot catch it; only exact-value redaction from the environment can.
+    """
+    bare_key = "4f8b2c1d9e7a6b5c4d3e2f1a0b9c8d7e"
+    monkeypatch.setenv("MISTRAL_API_KEY", bare_key)
+
+    class AuthenticationError(Exception):
+        message = f"litellm.AuthenticationError: Invalid API key: {bare_key}"
+
+    cell = _friendly_cell(AuthenticationError("x"))
+    assert "auth failed" in cell
+    assert bare_key not in cell
+    assert "[redacted]" in cell
+
+
+def test_provider_message_redacts_unmapped_provider_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Arrange: a provider frugon's prereq map does NOT know (perplexity —
+    reachable via `--measure --candidates "perplexity/sonar"`, since
+    --candidates takes any LiteLLM route).  _required_key_for_model returns
+    None for it, so LiteLLM authenticates from its OWN env var.
+    Assert: the key is still redacted — the environment scan is the floor,
+    not the provider map.  Enumerating providers is the bug this pins.
+    """
+    from frugon.measure import _required_key_for_model
+
+    key = "pplx-7f3a9c2e1b8d4f6a0c5e3b1d9a7f2c4e"
+    monkeypatch.setenv("PERPLEXITYAI_API_KEY", key)
+    # Precondition: frugon's prereq map genuinely does not cover this model.
+    assert _required_key_for_model("perplexity/sonar") is None
+
+    class AuthenticationError(Exception):
+        message = (
+            f"litellm.AuthenticationError: PerplexityException - Invalid API key: {key}"
+        )
+
+    cell = _friendly_cell(AuthenticationError("x"))
+    assert "auth failed" in cell
+    assert key not in cell
+    assert "7f3a9c2e" not in cell
+    assert "[redacted]" in cell
+
+
+def test_env_key_values_covers_mapped_var_without_credential_token() -> None:
+    """VERTEXAI_PROJECT carries none of the credential name tokens, so a token
+    scan alone would drop it.  The union with the provider map must keep it.
+    """
+    import os as _os
+
+    from frugon.measure import _env_key_values
+
+    assert not any(
+        tok in "VERTEXAI_PROJECT" for tok in ("KEY", "API", "TOKEN", "SECRET")
+    )
+    prior = _os.environ.get("VERTEXAI_PROJECT")
+    _os.environ["VERTEXAI_PROJECT"] = "vertex-project-12345"
+    try:
+        assert "vertex-project-12345" in _env_key_values()
+    finally:
+        if prior is None:
+            del _os.environ["VERTEXAI_PROJECT"]
+        else:
+            _os.environ["VERTEXAI_PROJECT"] = prior
+
+
+def test_unmapped_provider_key_redacted_on_report_surfaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unmapped-provider key must not reach the md/html report files
+    either — those are the artifacts users share (§5).
+    """
+    from frugon.report import _quality_section_html, _quality_section_md
+
+    key = "pplx-3e9a7c5f1b2d8e4a6c0f9b3d7e5a1c2f"
+    monkeypatch.setenv("PERPLEXITYAI_API_KEY", key)
+
+    class AuthenticationError(Exception):
+        message = f"litellm.AuthenticationError: Invalid API key: {key}"
+
+    cell = _friendly_cell(AuthenticationError("x"))
+    record = LogRecord(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": "Classify this ticket"}],
+        completion_text="ok",
+        prompt_tokens=10,
+        completion_tokens=5,
+        timestamp=None,
+    )
+    comp = Comparison(
+        record=record,
+        current_output=SampledOutput(model="gpt-4o", content="A"),
+        candidate_outputs=[
+            SampledOutput(
+                model="perplexity/sonar", content="", error=cell, error_cause="auth"
+            )
+        ],
+    )
+    mr = MeasureResult(
+        samples_requested=1,
+        samples_taken=1,
+        current_model="gpt-4o",
+        candidates=["perplexity/sonar"],
+        comparisons=[comp],
+        tier1_tallies=None,
+    )
+    md = "\n".join(_quality_section_md(mr))
+    html = _quality_section_html(mr, style="v1")
+    for surface in (md, html):
+        assert key not in surface
+        assert "3e9a7c5f" not in surface
+        assert "redacted" in surface
+
+
+def test_bare_env_key_redacted_on_report_surfaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Arrange: bare env key echoed in a candidate's error cell, built by the
+    real pipeline step (_friendly_cell), rendered into the report sections.
+    Assert: the md and HTML report files never carry the key value (§5).
+    """
+    from frugon.report import _quality_section_html, _quality_section_md
+
+    bare_key = "9d1c7e5f3a8b2d6c4e0f1a9b8c7d6e5f"
+    monkeypatch.setenv("TOGETHERAI_API_KEY", bare_key)
+
+    class AuthenticationError(Exception):
+        message = f"litellm.AuthenticationError: Invalid API key: {bare_key}"
+
+    cell = _friendly_cell(AuthenticationError("x"))
+    record = LogRecord(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": "Classify this ticket"}],
+        completion_text="ok",
+        prompt_tokens=10,
+        completion_tokens=5,
+        timestamp=None,
+    )
+    comp = Comparison(
+        record=record,
+        current_output=SampledOutput(model="gpt-4o", content="A"),
+        candidate_outputs=[
+            SampledOutput(
+                model="together-model", content="", error=cell, error_cause="auth"
+            )
+        ],
+    )
+    mr = MeasureResult(
+        samples_requested=1,
+        samples_taken=1,
+        current_model="gpt-4o",
+        candidates=["together-model"],
+        comparisons=[comp],
+        tier1_tallies=None,
+    )
+    md = "\n".join(_quality_section_md(mr))
+    html = _quality_section_html(mr, style="v1")
+    for surface in (md, html):
+        assert bare_key not in surface
+        # The cell itself renders (md inline-escapes the brackets, so assert
+        # on the marker word, not the literal bracketed form).
+        assert "redacted" in surface
+
+
+# ---------------------------------------------------------------------------
+# _response_error_code — defensive branches (it's a parser; branch coverage)
+# ---------------------------------------------------------------------------
+
+
+def test_response_error_code_json_raises_falls_back_to_message() -> None:
+    """Arrange: response whose .json() raises (unparseable body).
+    Assert: code extraction yields None and classification falls through to
+    the message heuristic — the quota signal still lands.
+    """
+
+    class _BrokenResponse:
+        def json(self) -> dict[str, object]:
+            raise ValueError("not json")
+
+    class RateLimitError(Exception):
+        message = "litellm.RateLimitError: You exceeded your current quota"
+
+        def __init__(self) -> None:
+            self.response = _BrokenResponse()
+
+    exc = RateLimitError()
+    assert _response_error_code(exc) is None
+    assert _classify_failure(exc) == "quota"
+
+
+def test_response_error_code_non_dict_bodies_return_none() -> None:
+    """Arrange: bodies that are not dicts, or whose 'error' is a bare string.
+    Assert: code extraction yields None and a non-quota message classifies as
+    the generic rate limit.
+    """
+
+    class _Resp:
+        def __init__(self, body: object) -> None:
+            self._body = body
+
+        def json(self) -> object:
+            return self._body
+
+    class RateLimitError(Exception):
+        message = "litellm.RateLimitError: Rate limit reached for requests"
+
+        def __init__(self, body: object) -> None:
+            self.response = _Resp(body)
+
+    assert _response_error_code(RateLimitError(["not", "a", "dict"])) is None
+    assert _response_error_code(RateLimitError({"error": "string"})) is None
+    assert _classify_failure(RateLimitError({"error": "string"})) == "rate_limit"
+
+
+# ---------------------------------------------------------------------------
+# Synthesis phrase — typed causes only, never display-string re-parsing
+# ---------------------------------------------------------------------------
+
+
+def test_summarize_sampling_failures_quota() -> None:
+    """Quota causes map to the billing-specific synthesis phrase."""
+    assert summarize_sampling_failures(["quota"]) == "quota exceeded (check billing)"
+
+
+def test_summarize_sampling_failures_auth() -> None:
+    """Auth causes map to the API-key synthesis phrase."""
+    assert summarize_sampling_failures(["auth"]) == "auth failure (check your API key)"
+
+
+def test_summarize_sampling_failures_generic_fallback() -> None:
+    """Unclassified/absent causes keep the generic rate-limit/API fallback."""
+    assert summarize_sampling_failures(["other", None]) == "rate limit or API error"
+
+
+def test_summarize_sampling_failures_mixed_priority() -> None:
+    """Mixed causes resolve by severity: quota beats auth beats rate limit."""
+    assert (
+        summarize_sampling_failures(["rate_limit", "auth", "quota"])
+        == "quota exceeded (check billing)"
+    )
+    assert (
+        summarize_sampling_failures(["rate_limit", "auth"])
+        == "auth failure (check your API key)"
+    )
 
 
 def test_friendly_cell_internal_server_error() -> None:

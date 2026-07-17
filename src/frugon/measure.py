@@ -17,10 +17,10 @@ import random
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from frugon.cost import LogRecord
 from frugon.model_id import canonicalize
@@ -192,6 +192,12 @@ def _extract_usage(response: Any) -> tuple[int, int]:
     return pt, ct
 
 
+# Typed classification of a sampling failure (see :func:`_classify_failure`).
+# Carried on SampledOutput alongside the rendered display cell so downstream
+# synthesis consumes the cause and never re-parses display strings.
+FailureCause = Literal["quota", "auth", "rate_limit", "other"]
+
+
 @dataclass
 class SampledOutput:
     """Output from one model for one sampled record.
@@ -200,12 +206,18 @@ class SampledOutput:
     the measure run incurred), or ``None`` when the call failed before returning
     a usage block.  It is display-only metadata — it never affects the content
     or the verdict — so existing constructors that omit it are unaffected.
+
+    ``error_cause`` is the typed failure classification, set by the sampling
+    path whenever ``error`` is set; synthesis consumes it instead of
+    re-parsing the display cell.  Constructors that omit it (tests, older
+    fixtures) read as an unclassified failure — the generic fallback.
     """
 
     model: str
     content: str
     error: str | None = None
     usage: MeasureCallUsage | None = None
+    error_cause: FailureCause | None = None
 
 
 @dataclass
@@ -461,6 +473,12 @@ def _levenshtein(a: str, b: str) -> int:
     return prev[-1]
 
 
+# Name tokens that mark an environment variable as credential-shaped.  Shared
+# by _nearest_env_var (which reads only NAMES, for typo hints) and
+# _env_key_values (which reads VALUES, to redact them from provider messages).
+_CREDENTIAL_NAME_TOKENS: tuple[str, ...] = ("KEY", "API", "TOKEN", "SECRET")
+
+
 def _nearest_env_var(expected: str, *, max_distance: int = 3) -> str | None:
     """Return a CURRENTLY-SET env var whose name is a likely typo of *expected*.
 
@@ -474,7 +492,7 @@ def _nearest_env_var(expected: str, *, max_distance: int = 3) -> str | None:
         if name == expected:
             continue
         upper = name.upper()
-        if not any(tok in upper for tok in ("KEY", "API", "TOKEN", "SECRET")):
+        if not any(tok in upper for tok in _CREDENTIAL_NAME_TOKENS):
             continue
         dist = _levenshtein(expected, name)
         if dist < best_dist:
@@ -778,10 +796,13 @@ def verify_measure_prerequisites(models: list[str]) -> None:
 # ---------------------------------------------------------------------------
 
 # Maps substrings of the exception type name to a short human-readable cell.
+# Failures with a distinguished cause (quota / auth / rate limit — see
+# :func:`_classify_failure`) are handled in :func:`_friendly_cell` with
+# redacted provider-message detail and never reach this table; note that a
+# BadRequestError carrying Anthropic's credit-exhaustion signal classifies as
+# quota, so only genuine bad requests hit the row below.
 _LITELLM_ERROR_CELLS: list[tuple[str, str]] = [
     ("NotFoundError", "[unavailable — project lacks access to this model]"),
-    ("AuthenticationError", "[auth failed — check your API key]"),
-    ("RateLimitError", "[rate limited — retry later]"),
     ("InternalServerError", "[provider error — retry later]"),
     ("BadRequestError", "[bad request — check model name and parameters]"),
     ("ServiceUnavailableError", "[service unavailable — retry later]"),
@@ -789,19 +810,258 @@ _LITELLM_ERROR_CELLS: list[tuple[str, str]] = [
     ("ContextWindowExceeded", "[context too long for this model]"),
 ]
 
+# Provider JSON error codes that mean billing/quota exhaustion rather than a
+# transient requests-per-minute throttle.  Matched against structured response
+# bodies before any message-text heuristic.
+_QUOTA_ERROR_CODES = frozenset({"insufficient_quota", "billing_not_active"})
+
+# Anthropic signals credit exhaustion as HTTP 400 (BadRequestError), not 429:
+# "Your credit balance is too low to access the Anthropic API."  The phrase is
+# the only stable signal — the structured error type on that response is the
+# generic ``invalid_request_error``.
+_ANTHROPIC_CREDIT_PHRASE = "credit balance is too low"
+
+# Strip LiteLLM's own exception framing from a provider message line.
+_LITELLM_MSG_PREFIX_RE = re.compile(r"^litellm\.\w+Error:\s*")
+
+# §5 privacy: shapes that must never reach a rendered surface (terminal cell,
+# markdown report, HTML report).  Keys first — known LLM-provider prefixes,
+# including provider-masked forms that keep a visible prefix and tail (OpenAI
+# masks like ``sk-proj-Ab3x***mZ7Q``) — then org/project/account identifiers,
+# then URLs (noise, and can embed identifiers in paths or query strings).
+# These patterns are the SECOND line: keys carry no reliable shape, so the
+# primary defence is exact-value redaction of every credential in the
+# environment (:func:`_env_key_values`, applied before these).  The patterns
+# still earn their place for values NOT sourced from this process's env — a
+# provider echoing a different account's identifier, or a key pasted into a
+# prompt — and for org/account ids and URLs, which are not env-sourced at all.
+_REDACTION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bsk-[A-Za-z0-9*_-]{4,}"),  # OpenAI sk-/sk-proj-, Anthropic sk-ant-
+    re.compile(r"\bAIza[A-Za-z0-9*_-]{4,}"),  # Google
+    re.compile(r"\bhf_[A-Za-z0-9*]{4,}"),  # Hugging Face
+    re.compile(r"\bgsk_[A-Za-z0-9*]{4,}"),  # Groq
+    re.compile(r"\bxai-[A-Za-z0-9*_-]{4,}"),  # xAI
+    re.compile(r"\borg[-_][A-Za-z0-9*_-]{2,}"),  # OpenAI organization ids
+    re.compile(r"\b(?:proj|project|acct|account)[-_][A-Za-z0-9*_-]{2,}"),
+    re.compile(r"https?://\S+"),
+)
+_REDACTED = "[redacted]"
+
+# Hard cap on the provider detail attached to a friendly cell — "short" is
+# enforced by construction, not by provider goodwill.
+_PROVIDER_MESSAGE_MAX_CHARS = 160
+
+
+def _env_key_values() -> tuple[str, ...]:
+    """Return every credential-shaped value in the environment.
+
+    Bare random-string keys have no matchable shape, so the redaction floor
+    is the VALUE, not a pattern.  Enumerating providers is the trap here:
+    ``_PROVIDER_KEY_MAP`` is frugon's PREREQ-CHECK map, not the set of vars
+    that authenticate a call.  ``--candidates`` accepts any LiteLLM route
+    (``perplexity/sonar``, ``fireworks_ai/…``), and for an unmapped model
+    LiteLLM reads its OWN env var, which no provider map of ours would ever
+    list.  So scan the UNION: the mapped vars (``VERTEXAI_PROJECT`` carries
+    none of the tokens below and would regress on a token scan alone) plus
+    every environment name that looks like a credential, using the same
+    token test :func:`_nearest_env_var` applies.  No map to maintain, and a
+    provider we have never heard of is covered on the day it ships.
+
+    Read per call (never cached) so tests and mid-process env changes are
+    honoured.  Longest first, so a value that is a substring of another
+    cannot pre-empt the longer match; values under 8 chars are skipped (too
+    short to be a real secret, and substring-replacing them would mangle
+    ordinary words).  Only VALUES are read — a name is never rendered.
+    """
+    names = set(_PROVIDER_KEY_MAP.values())
+    names.update(
+        name
+        for name in os.environ
+        if any(tok in name.upper() for tok in _CREDENTIAL_NAME_TOKENS)
+    )
+    seen: set[str] = set()
+    for var in names:
+        val = os.environ.get(var, "").strip()
+        if len(val) >= 8:
+            seen.add(val)
+    return tuple(sorted(seen, key=len, reverse=True))
+
+
+def _raw_provider_message(exc: Exception) -> str:
+    """Return the provider's message text for CLASSIFICATION only.
+
+    Unredacted and uncapped, so cause detection never misses a signal that
+    redaction or truncation would remove.  Never render this — every display
+    path goes through :func:`_provider_message_line`.
+    """
+    raw = getattr(exc, "message", None)
+    if raw is None:
+        raw = str(exc)
+    text = str(raw).strip()
+    return _LITELLM_MSG_PREFIX_RE.sub("", text).strip()
+
+
+def _provider_message_line(exc: Exception) -> str:
+    """Return the provider's error line, safe to render on every surface.
+
+    For typed LiteLLM exceptions the ``message`` attribute carries the
+    provider text; unknown exception types fall back to ``str(exc)``.  The
+    returned line is collapsed to its first line, then redacted in two
+    layers — every credential VALUE in this process's environment
+    (:func:`_env_key_values`, which needs no shape and no provider list),
+    then key shapes, org/project/account identifiers, and URLs
+    (``_REDACTION_PATTERNS``, which catch what the environment scan cannot
+    source) — and finally capped at ``_PROVIDER_MESSAGE_MAX_CHARS``.
+    Together these are the §5 guarantee that a cell never leaks a key, an
+    account identifier, or a link: enforced here by construction, because
+    the cell renders verbatim into the terminal table and the
+    markdown/HTML report files users share.
+    """
+    text = _raw_provider_message(exc)
+    text = text.splitlines()[0].strip() if text else ""
+    # Exact env-key values FIRST: they need no shape, and redacting them
+    # before the patterns run means a provider echoing the user's own key
+    # verbatim can never survive, whatever the key looks like.
+    for secret in _env_key_values():
+        text = text.replace(secret, _REDACTED)
+    for pattern in _REDACTION_PATTERNS:
+        text = pattern.sub(_REDACTED, text)
+    if len(text) > _PROVIDER_MESSAGE_MAX_CHARS:
+        text = text[: _PROVIDER_MESSAGE_MAX_CHARS - 1].rstrip() + "…"
+    return text
+
+
+def _response_error_code(exc: Exception) -> str | None:
+    """Extract a provider error ``code`` / ``type`` from a LiteLLM response."""
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+    try:
+        json_fn = getattr(response, "json", None)
+        data = json_fn() if callable(json_fn) else None
+    except (ValueError, TypeError, AttributeError):
+        # Unparseable / absent body — fall back to the message heuristic.
+        return None
+    if not isinstance(data, dict):
+        return None
+    err = data.get("error", data)
+    if not isinstance(err, dict):
+        return None
+    for key in ("code", "type"):
+        value = err.get(key)
+        if value:
+            return str(value).lower()
+    return None
+
+
+def _signals_quota(exc: Exception) -> bool:
+    """True when a 429's structured code or message signals quota/billing.
+
+    Secondary signals only — the caller (:func:`_classify_failure`) gates on
+    the exception TYPE first.  The structured response code is preferred;
+    message text is the last resort, and reads the RAW message so redaction
+    or truncation can never hide the signal.
+    """
+    code = _response_error_code(exc)
+    if code is not None and (code in _QUOTA_ERROR_CODES or "quota" in code):
+        return True
+    msg = _raw_provider_message(exc).lower()
+    return "quota" in msg or _ANTHROPIC_CREDIT_PHRASE in msg
+
+
+def _classify_failure(exc: Exception) -> FailureCause:
+    """Classify a sampling failure by cause — the single source of truth.
+
+    Layered detection discipline: exception TYPE first, structured provider
+    response code second, provider message text last.  The result travels on
+    :attr:`SampledOutput.error_cause`, so downstream synthesis consumes the
+    TYPED cause and never re-parses rendered display strings — the appended
+    provider text is arbitrary and can contain the very phrases a string
+    scan would key on (a throttle message mentioning "quota" must not turn
+    into a billing verdict downstream of a rate-limit classification).
+    """
+    type_name = type(exc).__name__
+    if "AuthenticationError" in type_name:
+        return "auth"
+    if "RateLimitError" in type_name:
+        return "quota" if _signals_quota(exc) else "rate_limit"
+    if "BadRequestError" in type_name:
+        # Anthropic signals credit exhaustion as HTTP 400, not 429.  Gate on
+        # the narrow signals only (structured quota code, or Anthropic's
+        # credit phrase) so a genuine bad request never reads as billing.
+        code = _response_error_code(exc)
+        if code in _QUOTA_ERROR_CODES:
+            return "quota"
+        if _ANTHROPIC_CREDIT_PHRASE in _raw_provider_message(exc).lower():
+            return "quota"
+    return "other"
+
+
+def _friendly_cell_with_detail(headline: str, exc: Exception) -> str:
+    """Attach the redacted provider message line after a friendly headline."""
+    detail = _provider_message_line(exc)
+    if detail:
+        return f"{headline} — {detail}"
+    return headline
+
+
+# Headline per distinguished cause; "other" falls through to the type-name
+# lookup table (_LITELLM_ERROR_CELLS) in _friendly_cell.
+_CAUSE_HEADLINES: dict[FailureCause, str] = {
+    "quota": "[quota exceeded — check billing]",
+    "auth": "[auth failed — check your API key]",
+    "rate_limit": "[rate limited — retry later]",
+}
+
 
 def _friendly_cell(exc: Exception) -> str:
     """Map a LiteLLM exception to a short, human-readable cell string.
 
-    Never includes a stack trace or raw exception message.
+    Quota, auth, and rate-limit failures append the provider's own one-line
+    message — redacted and length-capped by :func:`_provider_message_line` —
+    so a drained account is distinguishable from a transient throttle
+    without leaking keys, account identifiers, or URLs.  Other known types
+    keep headline-only cells; unknown types show only the exception class
+    (never a raw debug string).
     """
+    cause = _classify_failure(exc)
+    if cause != "other":
+        return _friendly_cell_with_detail(_CAUSE_HEADLINES[cause], exc)
     type_name = type(exc).__name__
     for fragment, cell in _LITELLM_ERROR_CELLS:
         if fragment in type_name:
             return cell
-    # Generic fallback: include only the exception type, never the full message
-    # (which can contain raw provider debug noise).
     return f"[error: {type_name}]"
+
+
+# Synthesis phrase per distinguished cause, in priority order when a run
+# carries mixed causes: quota beats auth beats rate limit (the user should
+# fix billing before chasing throttles).
+_CAUSE_PHRASES: tuple[tuple[FailureCause, str], ...] = (
+    ("quota", "quota exceeded (check billing)"),
+    ("auth", "auth failure (check your API key)"),
+    ("rate_limit", "rate limited (retry later)"),
+)
+
+# The one place the generic fallback wording lives.  Report surfaces import
+# this — never restate the string — so the vocabulary of the failure verdict
+# has a single source, like the cause phrases above.
+GENERIC_SAMPLING_FAILURE_PHRASE = "rate limit or API error"
+
+
+def summarize_sampling_failures(causes: Iterable[FailureCause | None]) -> str:
+    """Return the most specific synthesis phrase for a set of typed causes.
+
+    Consumes :attr:`SampledOutput.error_cause` values — NEVER rendered cell
+    strings, whose appended provider text is arbitrary and can contain the
+    very phrases a string scan would match.  Priority when causes are mixed:
+    quota > auth > rate limit > generic fallback.
+    """
+    seen = {cause for cause in causes if cause is not None}
+    for cause, phrase in _CAUSE_PHRASES:
+        if cause in seen:
+            return phrase
+    return GENERIC_SAMPLING_FAILURE_PHRASE
 
 
 # ---------------------------------------------------------------------------
@@ -948,7 +1208,12 @@ def _call_model(
             if inner.startswith(_REDUNDANT_PREFIX):
                 inner = inner[len(_REDUNDANT_PREFIX):]
             cell = f"[baseline unavailable — {inner}]"
-        return SampledOutput(model=model, content="", error=cell)
+        return SampledOutput(
+            model=model,
+            content="",
+            error=cell,
+            error_cause=_classify_failure(exc),
+        )
 
 
 # ---------------------------------------------------------------------------
