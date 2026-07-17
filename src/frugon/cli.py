@@ -1678,6 +1678,10 @@ def quality_update() -> None:
                 )
     except QualityUpdateError as exc:
         rprint(f"[red]quality update failed:[/red] {exc}")
+        rprint(
+            "[dim]Existing quality tiers remain in use "
+            "(bundled seed or last successful sync).[/dim]"
+        )
         raise typer.Exit(code=1) from exc
 
     rprint(
@@ -1751,6 +1755,10 @@ def update() -> None:
                 )
     except QualityUpdateError as exc:
         rprint(f"[red]quality update failed:[/red] {exc}")
+        rprint(
+            "[dim]Existing quality tiers remain in use "
+            "(bundled seed or last successful sync).[/dim]"
+        )
         raise typer.Exit(code=1) from exc
 
     rprint(

@@ -320,6 +320,31 @@ def test_update_command_quality_failure_exits_1(monkeypatch: pytest.MonkeyPatch)
 
     assert result.exit_code == 1
     assert "quality update failed" in result.output
+    # The "using bundled tiers" claim lives here, not in the raised exception's
+    # own message -- this is the code path that actually leaves the
+    # existing/bundled quality.json in place after the failed fetch.
+    assert "bundled" in result.output.lower()
+
+
+def test_quality_update_command_failure_states_fallback_truthfully(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """frugon quality update: on failure, prints the fallback wording itself
+    (the fetch exception message must not claim it -- see
+    test_quality.py::TestSyncRetryProfile::test_exception_message_makes_no_fallback_claim).
+    """
+    from frugon.quality import QualityUpdateError
+
+    monkeypatch.setattr(
+        "frugon.quality.fetch_and_update_quality",
+        MagicMock(side_effect=QualityUpdateError("leaderboard unavailable after 5 attempts")),
+    )
+
+    result = runner.invoke(app, ["quality", "update"])
+
+    assert result.exit_code == 1
+    assert "quality update failed" in result.output
+    assert "bundled" in result.output.lower()
 
 
 def test_analyze_demo_pool_notice_renders(monkeypatch: pytest.MonkeyPatch) -> None:

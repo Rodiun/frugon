@@ -84,9 +84,20 @@ _HF_PAGE_LENGTH = 100
 # Retry parameters for _fetch_rows.  On HTTP 429, HTTP 5xx, or transient
 # URLError/OSError, retry up to _FETCH_MAX_RETRIES times with exponential backoff.
 # A 429 response may include a Retry-After header (integer seconds); that overrides
-# the schedule.
+# the schedule.  This is the CLI-facing default (`frugon quality update`, `frugon
+# update`) — snappy on purpose, so an offline/degraded user reaches the graceful
+# bundled/last-synced-tier fallback in ~15s rather than hanging.
 _FETCH_MAX_RETRIES: int = 4
 _FETCH_BACKOFF_BASE: float = 1.0  # seconds; doubles each attempt: 1, 2, 4, 8
+
+# Patient retry profile for the scheduled `quality-sync.yml` workflow only.
+# HuggingFace dataset-server 503s during a real outage last minutes, not
+# seconds, so the CLI-facing defaults above (~15s total) are decorative
+# against that failure mode. quality-sync.yml imports these and passes them
+# explicitly to fetch_and_update_quality; the CLI keeps the snappy default
+# above so it is never slowed down by a budget sized for an unattended cron.
+SYNC_MAX_RETRIES: int = 5
+SYNC_BACKOFF_BASE: float = 15.0  # seconds: 15, 30, 60, 120, 240 ≈ 7.75 min total
 
 _ALLOWED_QUALITY_HOSTS: frozenset[str] = frozenset({"datasets-server.huggingface.co"})
 
@@ -744,24 +755,38 @@ class QualityUpdateError(RuntimeError):
     """Raised when quality update fails (network error, bad payload, I/O error)."""
 
 
-def _fetch_one_page(url: str, timeout: int) -> bytes:
+def _fetch_one_page(
+    url: str,
+    timeout: int,
+    max_retries: int = _FETCH_MAX_RETRIES,
+    backoff_base: float = _FETCH_BACKOFF_BASE,
+) -> bytes:
     """Fetch a single page URL, retrying on HTTP 429, HTTP 5xx, and transient
     network errors.
 
-    Retry schedule: up to _FETCH_MAX_RETRIES attempts after the initial request,
-    with exponential backoff (_FETCH_BACKOFF_BASE * 2^attempt seconds).  A 429
-    response may carry a Retry-After header (integer seconds); when present it
-    overrides the computed backoff.  The HF datasets-server returns sporadic 500s
-    on individual /filter pages under load, so a single bad page must not fail the
-    whole sync.
+    Retry schedule: up to *max_retries* attempts after the initial request, with
+    exponential backoff (*backoff_base* * 2^attempt seconds).  A 429 response may
+    carry a Retry-After header (integer seconds); when present it overrides the
+    computed backoff.  The HF datasets-server returns sporadic 500s on individual
+    /filter pages under load, so a single bad page must not fail the whole sync.
+    Defaults are the CLI-facing profile (_FETCH_MAX_RETRIES / _FETCH_BACKOFF_BASE);
+    the scheduled sync workflow passes the patient SYNC_MAX_RETRIES /
+    SYNC_BACKOFF_BASE profile explicitly instead.
 
     Raises QualityUpdateError after retries are exhausted, or immediately on a
-    non-retryable HTTP error (4xx other than 429).
+    non-retryable HTTP error (4xx other than 429).  The message never claims a
+    fallback happened here — this function only fetches; whichever caller
+    actually falls back to bundled/last-synced tiers states that itself.
     """
 
     def _on_failure(exc: Exception) -> QualityUpdateError:
         if isinstance(exc, urllib.error.HTTPError):
-            return QualityUpdateError("leaderboard unavailable, using bundled tiers")
+            if exc.code == 429 or exc.code >= 500:
+                return QualityUpdateError(
+                    f"leaderboard unavailable after {max_retries + 1} attempts "
+                    f"(HTTP {exc.code})"
+                )
+            return QualityUpdateError(f"leaderboard unavailable (HTTP {exc.code})")
         return QualityUpdateError(f"Network error fetching leaderboard: {exc}")
 
     return fetch_url_with_retry(
@@ -769,17 +794,24 @@ def _fetch_one_page(url: str, timeout: int) -> bytes:
         user_agent=USER_AGENT,
         max_bytes=_MAX_RESPONSE_BYTES,
         timeout=timeout,
-        max_retries=_FETCH_MAX_RETRIES,
-        backoff_base=_FETCH_BACKOFF_BASE,
+        max_retries=max_retries,
+        backoff_base=backoff_base,
         on_failure=_on_failure,
     )
 
 
-def _fetch_rows(base_url: str, page_length: int, timeout: int = 30) -> list[dict[str, Any]]:
+def _fetch_rows(
+    base_url: str,
+    page_length: int,
+    timeout: int = 30,
+    max_retries: int = _FETCH_MAX_RETRIES,
+    backoff_base: float = _FETCH_BACKOFF_BASE,
+) -> list[dict[str, Any]]:
     """Paginate through the HF datasets-server /filter (or /rows) endpoint.
 
     Each page is fetched via _fetch_one_page which handles retry-with-backoff
-    for HTTP 429 / HTTP 5xx and transient URLError/OSError.  Raises
+    for HTTP 429 / HTTP 5xx and transient URLError/OSError, using *max_retries*
+    / *backoff_base* (defaults match the CLI-facing profile).  Raises
     QualityUpdateError when any page cannot be fetched after exhausting retries.
     """
     all_rows: list[dict[str, Any]] = []
@@ -788,7 +820,9 @@ def _fetch_rows(base_url: str, page_length: int, timeout: int = 30) -> list[dict
 
     while True:
         url = f"{base_url}&offset={offset}&length={page_length}"
-        page_bytes = _fetch_one_page(url, timeout)
+        page_bytes = _fetch_one_page(
+            url, timeout, max_retries=max_retries, backoff_base=backoff_base
+        )
 
         try:
             page: dict[str, Any] = json.loads(page_bytes)
@@ -867,11 +901,19 @@ def fetch_and_update_quality(
     today_date_str: str,
     page_length: int = _HF_PAGE_LENGTH,
     timeout: int = 30,
+    max_retries: int = _FETCH_MAX_RETRIES,
+    backoff_base: float = _FETCH_BACKOFF_BASE,
 ) -> dict[str, int]:
     """Fetch the LMArena leaderboard, bin into tiers, and atomically update *output_path*.
 
     *output_path* should be the user data dir path (_QUALITY_JSON) so updates
     survive reinstalls.  The CLI passes _QUALITY_JSON directly.
+
+    *max_retries* / *backoff_base* default to the CLI-facing profile
+    (_FETCH_MAX_RETRIES / _FETCH_BACKOFF_BASE) so every existing caller's
+    behaviour is byte-identical.  The scheduled `quality-sync.yml` workflow
+    passes the patient SYNC_MAX_RETRIES / SYNC_BACKOFF_BASE profile explicitly,
+    since a real HuggingFace outage lasts minutes, not seconds.
 
     Returns {"models_synced": N} on success.
     Raises QualityUpdateError on any failure — *output_path* is never modified
@@ -880,7 +922,9 @@ def fetch_and_update_quality(
     """
     validate_fetch_url(hf_base_url, _ALLOWED_QUALITY_HOSTS)
 
-    rows = _fetch_rows(hf_base_url, page_length, timeout=timeout)
+    rows = _fetch_rows(
+        hf_base_url, page_length, timeout=timeout, max_retries=max_retries, backoff_base=backoff_base
+    )
 
     if not rows:
         raise QualityUpdateError("Leaderboard returned no rows")

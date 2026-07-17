@@ -40,6 +40,8 @@ from frugon.quality import (
     _HF_BASE_URL,
     _MAX_RESPONSE_BYTES,
     _OVERALL_CATEGORY,
+    SYNC_BACKOFF_BASE,
+    SYNC_MAX_RETRIES,
     UNRATED_TIER,
     VERDICT_INVALID,
     VERDICT_MAJOR,
@@ -2091,6 +2093,105 @@ class TestFetchOnePageRetry:
                 )
 
         assert not output.exists(), "output must NOT be written when retries exhausted"
+
+
+class TestSyncRetryProfile:
+    """quality-sync-retry-profile: the CLI default and the scheduled-sync
+    patient profile must each produce their own distinct, correct backoff
+    schedule, and the exception message must never claim a fallback that the
+    fetch layer itself does not perform.
+    """
+
+    @staticmethod
+    def _always_429(*args: object, **kwargs: object) -> Any:
+        raise urllib.error.HTTPError(
+            url="https://datasets-server.huggingface.co/filter",
+            code=429,
+            msg="Too Many Requests",
+            hdrs={},
+            fp=None,
+        )
+
+    def test_default_profile_preserves_existing_1_2_4_8_schedule(self) -> None:
+        """Calling _fetch_one_page with no retry kwargs is byte-identical to
+        before this change: 4 retries at backoff base 1.0 -> 1, 2, 4, 8."""
+        with patch("urllib.request.urlopen", self._always_429), \
+             patch("time.sleep") as mock_sleep:
+            with pytest.raises(QualityUpdateError):
+                _fetch_one_page("https://datasets-server.huggingface.co/filter?x=1", 30)
+
+        sleep_args = [c[0][0] for c in mock_sleep.call_args_list]
+        assert sleep_args == [_FETCH_BACKOFF_BASE * (2**i) for i in range(_FETCH_MAX_RETRIES)]
+        assert sleep_args == [1.0, 2.0, 4.0, 8.0]
+
+    def test_patient_sync_profile_yields_outage_shaped_schedule(self) -> None:
+        """Passing SYNC_MAX_RETRIES / SYNC_BACKOFF_BASE explicitly (as
+        quality-sync.yml does) yields 15, 30, 60, 120, 240 -- a schedule sized
+        for a real, minutes-long HuggingFace outage rather than a transient
+        blip."""
+        with patch("urllib.request.urlopen", self._always_429), \
+             patch("time.sleep") as mock_sleep:
+            with pytest.raises(QualityUpdateError):
+                _fetch_one_page(
+                    "https://datasets-server.huggingface.co/filter?x=1",
+                    30,
+                    max_retries=SYNC_MAX_RETRIES,
+                    backoff_base=SYNC_BACKOFF_BASE,
+                )
+
+        sleep_args = [c[0][0] for c in mock_sleep.call_args_list]
+        assert sleep_args == [15.0, 30.0, 60.0, 120.0, 240.0]
+        assert sum(sleep_args) == pytest.approx(465.0)
+
+    def test_fetch_and_update_quality_default_args_unchanged_behaviour(
+        self, tmp_path: Path
+    ) -> None:
+        """fetch_and_update_quality called with no max_retries/backoff_base
+        kwargs (every pre-existing caller) must retry exactly _FETCH_MAX_RETRIES
+        times at the _FETCH_BACKOFF_BASE schedule -- the new parameters must not
+        change any caller-visible behaviour when omitted."""
+        output = tmp_path / "quality.json"
+        with patch("urllib.request.urlopen", self._always_429), \
+             patch("time.sleep") as mock_sleep:
+            with pytest.raises(QualityUpdateError):
+                fetch_and_update_quality(
+                    hf_base_url=_HF_BASE_URL,
+                    output_path=output,
+                    today_date_str="2026-07-17",
+                )
+
+        assert mock_sleep.call_count == _FETCH_MAX_RETRIES
+        sleep_args = [c[0][0] for c in mock_sleep.call_args_list]
+        assert sleep_args == [_FETCH_BACKOFF_BASE * (2**i) for i in range(_FETCH_MAX_RETRIES)]
+
+    def test_exception_message_makes_no_fallback_claim(self) -> None:
+        """The exception raised by the fetch layer must be context-neutral and
+        factual -- it must never claim 'using bundled tiers', because in the
+        quality-sync.yml context no fallback happens at all (the job aborts),
+        and even in the CLI context this function has not performed any
+        fallback itself. That wording belongs solely to the CLI code path that
+        actually leaves the existing/bundled data in place (see
+        test_cli.py's fallback-wording assertions)."""
+        with patch("urllib.request.urlopen", self._always_429), patch("time.sleep"):
+            with pytest.raises(QualityUpdateError) as exc_info:
+                _fetch_one_page("https://datasets-server.huggingface.co/filter?x=1", 30)
+
+        message = str(exc_info.value)
+        assert "bundled" not in message.lower()
+        assert "using" not in message.lower()
+        assert "attempts" in message
+
+    def test_exception_message_states_attempt_count(self) -> None:
+        """Exhausting the patient sync profile's retries states the actual
+        number of attempts made (max_retries + 1), not the CLI default's."""
+        with patch("urllib.request.urlopen", self._always_429), patch("time.sleep"):
+            with pytest.raises(QualityUpdateError, match=r"after 6 attempts"):
+                _fetch_one_page(
+                    "https://datasets-server.huggingface.co/filter?x=1",
+                    30,
+                    max_retries=SYNC_MAX_RETRIES,
+                    backoff_base=SYNC_BACKOFF_BASE,
+                )
 
 
 # ---------------------------------------------------------------------------
