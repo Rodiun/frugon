@@ -52,13 +52,23 @@ jobs:
         id: fetch
         run: |
           uv run python - <<'EOF'
-          from frugon.quality import fetch_and_update_quality, _HF_BASE_URL
+          from frugon.quality import (
+              fetch_and_update_quality,
+              _HF_BASE_URL,
+              SYNC_MAX_RETRIES,
+              SYNC_BACKOFF_BASE,
+          )
           from datetime import date
           from pathlib import Path
+          # Patient retry budget (~7.75 min: 15/30/60/120/240s) — this scheduled
+          # job must ride out an outage-shaped HF failure, unlike the CLI's
+          # snappy default which is sized for a fast graceful-fallback instead.
           result = fetch_and_update_quality(
               _HF_BASE_URL,
               Path("src/frugon/data/quality.json"),
               date.today().isoformat(),
+              max_retries=SYNC_MAX_RETRIES,
+              backoff_base=SYNC_BACKOFF_BASE,
           )
           print(f"Synced {result['models_synced']} models")
           EOF

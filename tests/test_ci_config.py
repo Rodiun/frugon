@@ -167,6 +167,42 @@ def test_release_workflow_setup_uv_steps_use_distinct_cache_suffixes() -> None:
     )
 
 
+def test_quality_sync_workflow_uses_patient_retry_profile() -> None:
+    """quality-sync-retry-profile: the scheduled quality-sync.yml job must pass
+    the patient SYNC_MAX_RETRIES / SYNC_BACKOFF_BASE profile to
+    fetch_and_update_quality explicitly. Without this pin, a future edit could
+    silently drop back to the CLI's snappy default (~15s total) -- decorative
+    against the minutes-long HuggingFace dataset-server outages that actually
+    redden this workflow.
+    """
+    workflow = (WORKFLOWS / "quality-sync.yml").read_text(encoding="utf-8")
+
+    fetch_step_match = re.search(
+        r"- name: Fetch new quality tiers\n(?P<body>(?:[ \t]+\S.*\n)+)", workflow
+    )
+    assert fetch_step_match is not None, (
+        "quality-sync.yml: 'Fetch new quality tiers' step not found"
+    )
+    step_body = fetch_step_match.group("body")
+
+    assert "SYNC_MAX_RETRIES" in step_body
+    assert "SYNC_BACKOFF_BASE" in step_body
+    assert "max_retries=SYNC_MAX_RETRIES" in step_body, (
+        "the fetch step must pass max_retries=SYNC_MAX_RETRIES explicitly"
+    )
+    assert "backoff_base=SYNC_BACKOFF_BASE" in step_body, (
+        "the fetch step must pass backoff_base=SYNC_BACKOFF_BASE explicitly"
+    )
+
+    # Pin the constants' actual values too, so a drift in quality.py itself
+    # (not just the workflow wiring) is caught here: an outage-shaped budget
+    # is ~7.75 minutes (15/30/60/120/240s), not the CLI's ~15s total.
+    from frugon.quality import SYNC_BACKOFF_BASE, SYNC_MAX_RETRIES
+
+    assert SYNC_MAX_RETRIES == 5
+    assert SYNC_BACKOFF_BASE == 15.0
+
+
 def test_release_and_sync_workflows_pin_actions_to_commit_shas() -> None:
     """Supply-chain hardening: the publish/sync workflows (which push to PyPI and
     open PRs) must pin every third-party action to a full 40-hex commit SHA, not a
