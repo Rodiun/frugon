@@ -193,6 +193,17 @@ QUALITY_EQUAL_OR_BETTER = (
 )
 PRIVACY_CAVEAT = "Your data never leaves your machine."
 
+# Shown in place of the "no cheaper candidate found" hero when the candidate
+# pool never priced (state (b) of the three-state no-candidate distinction:
+# (a) evaluated, none cheaper; (b) no priceable candidate in the pool; (c) a
+# mixed pool, handled by the existing per-candidate "unpriced" tag).  A local
+# or otherwise unlisted model has no published API price, so the cost race
+# never ran -- this says so plainly rather than reading as an evaluated loss.
+NO_PRICEABLE_CANDIDATES_NOTE = (
+    "Local models cost $0 in API spend, but frugon won't fabricate a price to "
+    "project a saving against. The quality comparison below still covers them."
+)
+
 # The footer privacy line for the split headline — the two clauses a buyer needs
 # at a glance.  Named (and kept) distinct from cli.PRIVACY_LINE (the fuller
 # three-clause line the wholesale path prints) so each surface reads at its
@@ -2254,10 +2265,26 @@ def _render_wholesale_panel(result: AnalysisResult) -> None:
     # No cheaper candidate found — there is no swap to recommend.  Say so honestly
     # (muted, never green) and stop: no phantom "New spend $0 / SAVING 100%" line,
     # which a None candidate's zero projected_cost would otherwise produce.
+    #
+    # Two distinct honest states share this branch (never conflate them): (a)
+    # the cost race ran and every candidate lost -- "no cheaper candidate
+    # found" -- vs (b) the pool never priced at all, so there was no race to
+    # run.  A local/unlisted model landing here would otherwise read as an
+    # evaluated-and-lost verdict when frugon simply had no list price to
+    # project against.
     if not result.candidate_model:
         body.append("\n\n")
         body.append("  ")
-        body.append("no cheaper candidate found", style="dim")
+        if result.no_priceable_candidates:
+            body.append(
+                f"no list price for {_unpriced_candidates_label(result)}",
+                style="dim",
+            )
+            body.append("\n")
+            body.append("  ")
+            body.append(NO_PRICEABLE_CANDIDATES_NOTE, style="dim")
+        else:
+            body.append("no cheaper candidate found", style="dim")
         panel = Panel(
             body,
             title="[bold cyan]frugon · cost analysis[/bold cyan]",
@@ -4955,6 +4982,19 @@ def _dominant_model(result: AnalysisResult) -> str | None:
     return max(result.cost_by_model, key=lambda m: result.cost_by_model[m])
 
 
+def _unpriced_candidates_label(result: AnalysisResult) -> str:
+    """Comma-joined ``--candidates`` names with no known list price, for state (b).
+
+    Falls back to a generic phrase if the list is somehow empty (defensive;
+    ``no_priceable_candidates`` is only ever True alongside a non-empty
+    ``unpriced_candidate_names``).
+    """
+    names = result.unpriced_candidate_names
+    if not names:  # pragma: no cover — defensive; see docstring
+        return "the candidate pool"
+    return ", ".join(names)
+
+
 def _projection_label(result: AnalysisResult) -> str:
     """Human-readable projection disclosure string."""
     if result.window_days is not None:
@@ -5627,6 +5667,14 @@ def render_markdown(
             _unrated_lines = _md_unrated_family_lines(result, judged_models_from_measure(measure_result))
             if _unrated_lines:
                 lines += [""] + _unrated_lines
+        elif result.no_priceable_candidates:
+            # State (b): the pool never priced, so there is no swap to report —
+            # distinct from state (a) (evaluated, none cheaper), which stays the
+            # existing silent omission above.
+            lines += [
+                f"- **No list price for:** {_unpriced_candidates_label(result)}",
+                f"- {NO_PRICEABLE_CANDIDATES_NOTE}",
+            ]
 
         # Candidates considered (multi-candidate transparency) — no-op when
         # the user passed <=1 candidate (block lines is empty, byte-identical).
@@ -5785,6 +5833,14 @@ def render_markdown_v2(
             f"**Cut these calls ~{float(saving_pct):.1f}% — {before} → {after}.**",
             "",
             f"_{_hero_tail}_",
+            "",
+        ]
+    elif result.no_priceable_candidates:
+        # State (b): the pool never priced, so there was no race to lose —
+        # distinct from state (a) below (evaluated, none cheaper).
+        lines += [
+            f"**No list price for {_unpriced_candidates_label(result)}.** "
+            f"{NO_PRICEABLE_CANDIDATES_NOTE}",
             "",
         ]
     else:
@@ -6647,6 +6703,14 @@ def render_html(
             headline = (
                 f'<div class="saving-hero">{_html_escape.escape(saving_str)}</div>'
                 f'<div class="saving-sub">estimated saving ({projection_label})</div>'
+            )
+        elif result.no_priceable_candidates:
+            # State (b): the pool never priced, so there was no race to lose —
+            # distinct from state (a) below (evaluated, none cheaper).
+            headline = (
+                '<div class="saving-sub" style="margin-bottom:.5rem">'
+                f"No list price for {_html_escape.escape(_unpriced_candidates_label(result))}. "
+                f"{_html_escape.escape(NO_PRICEABLE_CANDIDATES_NOTE)}</div>"
             )
         else:
             headline = (
@@ -7982,6 +8046,14 @@ def render_html_v2(
             '<p class="hero-caveat">'
             f"<span class='mono' style='color:var(--ink-dim)'>{projection_label}.</span> "
             f"{_ws_estimate_note}</p>"
+        )
+    elif result.no_priceable_candidates:
+        # State (b): the pool never priced, so there was no race to lose —
+        # distinct from state (a) below (evaluated, none cheaper).
+        hero.append(
+            '<p class="no-rec">'
+            f'<span class="accent">No list price for {esc(_unpriced_candidates_label(result))}.</span> '
+            f"{esc(NO_PRICEABLE_CANDIDATES_NOTE)}</p>"
         )
     else:
         hero.append(
