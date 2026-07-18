@@ -4,6 +4,15 @@
 
 ### Unreleased
 
+- **`--judge` and `--judge-model` now fail fast when their prerequisite is
+  missing.** Passing `--judge` without `--measure`, or `--judge-model`
+  without `--judge`, used to run the analysis and silently ignore the flag.
+  Both now error immediately with a clear message instead of quietly doing
+  nothing.
+- **Sampling failures during `--measure` now name the cause.** A drained
+  account or bad key used to surface as one generic error. frugon now tells
+  you whether it was quota exhaustion, an auth failure, or a rate limit, so
+  you know what to fix.
 - **Saving percentages now floor, never round up.** Displayed saving
   percentages used to round to one decimal, which could nudge a figure up
   across a boundary (e.g. 49.96% → 50.0%), marginally overstating the saving.

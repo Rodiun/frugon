@@ -199,10 +199,17 @@ PRIVACY_CAVEAT = "Your data never leaves your machine."
 # mixed pool, handled by the existing per-candidate "unpriced" tag).  A local
 # or otherwise unlisted model has no published API price, so the cost race
 # never ran -- this says so plainly rather than reading as an evaluated loss.
+# Always true regardless of what else the report renders.
 NO_PRICEABLE_CANDIDATES_NOTE = (
     "Local models cost $0 in API spend, but frugon won't fabricate a price to "
-    "project a saving against. The quality comparison below still covers them."
+    "project a saving against."
 )
+# Appended after NO_PRICEABLE_CANDIDATES_NOTE ONLY when a quality comparison
+# actually renders below it in the same report -- see
+# _no_priceable_candidates_note_text.  Kept as its own constant (not folded
+# back into the note above) so the always-true clause and the conditional
+# clause can never drift out of sync across the five surfaces that render it.
+NO_PRICEABLE_CANDIDATES_QUALITY_CLAUSE = "The quality comparison below still covers them."
 
 # The footer privacy line for the split headline — the two clauses a buyer needs
 # at a glance.  Named (and kept) distinct from cli.PRIVACY_LINE (the fuller
@@ -2282,7 +2289,7 @@ def _render_wholesale_panel(result: AnalysisResult) -> None:
             )
             body.append("\n")
             body.append("  ")
-            body.append(NO_PRICEABLE_CANDIDATES_NOTE, style="dim")
+            body.append(_no_priceable_candidates_note_text(result), style="dim")
         else:
             body.append("no cheaper candidate found", style="dim")
         panel = Panel(
@@ -4995,6 +5002,26 @@ def _unpriced_candidates_label(result: AnalysisResult) -> str:
     return ", ".join(names)
 
 
+def _no_priceable_candidates_note_text(
+    result: AnalysisResult, measure_result: MeasureResult | None = None
+) -> str:
+    """State-(b) note text, with the quality-comparison clause appended ONLY
+    when a quality comparison actually renders below it in the SAME report.
+
+    Two independent ways a quality comparison can appear: ``measure_result``
+    is not ``None`` (a ``--measure`` / ``--judge`` run produced a Tier-0 or
+    Tier-1 quality section), or the offline "Candidates considered" table
+    renders its Quality tier column (``len(candidate_projections) > 1`` --
+    no measure run needed).  Neither holds for the single-candidate, no-
+    ``--measure`` case (e.g. ``--candidates ollama/llama3.2:1b``), where the
+    old unconditional clause pointed at a comparison that was never rendered
+    (the live bug this fixes).
+    """
+    if measure_result is not None or len(result.candidate_projections) > 1:
+        return f"{NO_PRICEABLE_CANDIDATES_NOTE} {NO_PRICEABLE_CANDIDATES_QUALITY_CLAUSE}"
+    return NO_PRICEABLE_CANDIDATES_NOTE
+
+
 def _projection_label(result: AnalysisResult) -> str:
     """Human-readable projection disclosure string."""
     if result.window_days is not None:
@@ -5673,7 +5700,7 @@ def render_markdown(
             # existing silent omission above.
             lines += [
                 f"- **No list price for:** {_unpriced_candidates_label(result)}",
-                f"- {NO_PRICEABLE_CANDIDATES_NOTE}",
+                f"- {_no_priceable_candidates_note_text(result, measure_result)}",
             ]
 
         # Candidates considered (multi-candidate transparency) — no-op when
@@ -5840,7 +5867,7 @@ def render_markdown_v2(
         # distinct from state (a) below (evaluated, none cheaper).
         lines += [
             f"**No list price for {_unpriced_candidates_label(result)}.** "
-            f"{NO_PRICEABLE_CANDIDATES_NOTE}",
+            f"{_no_priceable_candidates_note_text(result, measure_result)}",
             "",
         ]
     else:
@@ -6710,7 +6737,7 @@ def render_html(
             headline = (
                 '<div class="saving-sub" style="margin-bottom:.5rem">'
                 f"No list price for {_html_escape.escape(_unpriced_candidates_label(result))}. "
-                f"{_html_escape.escape(NO_PRICEABLE_CANDIDATES_NOTE)}</div>"
+                f"{_html_escape.escape(_no_priceable_candidates_note_text(result, measure_result))}</div>"
             )
         else:
             headline = (
@@ -8053,7 +8080,7 @@ def render_html_v2(
         hero.append(
             '<p class="no-rec">'
             f'<span class="accent">No list price for {esc(_unpriced_candidates_label(result))}.</span> '
-            f"{esc(NO_PRICEABLE_CANDIDATES_NOTE)}</p>"
+            f"{esc(_no_priceable_candidates_note_text(result, measure_result))}</p>"
         )
     else:
         hero.append(
