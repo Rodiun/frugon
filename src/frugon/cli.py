@@ -770,7 +770,7 @@ def analyze(
         "-v",
         help=(
             "Show supporting detail beneath the recommendation: the wholesale "
-            "upper bound, the easy/hard heuristic, and automated routing."
+            "upper bound and the easy/hard heuristic."
         ),
         show_default=False,
     ),

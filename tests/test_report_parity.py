@@ -413,7 +413,7 @@ class TestItem7Ordering:
         assert flat.index("Prices") < i_quality_synced, flat
 
     def test_terminal_verbose_notes_upper_bound_before_log_span(self) -> None:
-        """Verbose Notes: Upper bound -> Log span -> Method -> Automate."""
+        """Verbose Notes: Upper bound -> Log span -> Method."""
         text = _term(_split_result(), verbose=True)
         flat = re.sub(r"\x1b\[[0-9;]*m", "", text)
         # Restrict to the Notes section so the Accounting Upper-bound row does not

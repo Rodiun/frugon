@@ -229,6 +229,17 @@ class TestTerminalSplit:
         # They appear in order and are the last three content lines.
         assert caveat[0] < privacy[0] < upsell[0]
 
+    def test_terminal_verbose_carries_the_upsell_exactly_once(self) -> None:
+        """--verbose must not duplicate the site CTA: the Notes block used to
+        carry its own 'Automate' row on top of the shared footer's upsell line,
+        so the same https://frugon.rodiun.io pitch printed twice.  The footer is
+        the ONE place it belongs, in both default and --verbose views."""
+        text = _render_to_text(_result_with_split(), verbose=True)
+        lines = [ln.rstrip() for ln in text.splitlines()]
+        upsell = [i for i, ln in enumerate(lines) if "frugon.rodiun.io" in ln]
+        assert len(upsell) == 1, f"expected one upsell line, got {len(upsell)}"
+        assert "Automate" not in text
+
     def test_terminal_colour_discipline_green_only_on_saving(self) -> None:
         """The emerald saving colour (#10B981) wraps ONLY money-win text.
 
@@ -362,7 +373,9 @@ class TestTerminalSplit:
         assert "the conservative, quality-respecting recommendation" not in out
 
     def test_terminal_verbose_reveals_supporting_detail(self, capsys: Any) -> None:
-        """--verbose carries upper bound + heuristic + automate upsell."""
+        """--verbose carries upper bound + heuristic; the footer still carries
+        the one upsell line (see test_terminal_verbose_carries_the_upsell_exactly_once
+        for the no-duplicate regression)."""
         render_terminal(_result_with_split(), verbose=True)
         out = " ".join(capsys.readouterr().out.split())
         assert "Upper bound" in out
