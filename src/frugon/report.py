@@ -451,7 +451,7 @@ def _excluded_unrated_caveat(model: str, saving_pct: Decimal | None) -> str:
     gracefully to omit the figure rather than print a bare placeholder.
     """
     if saving_pct is not None:
-        lead = f"{model} could save ~{float(saving_pct):.1f}%, but it's unrated"
+        lead = f"{model} could save ~{_display_pct(saving_pct):.1f}%, but it's unrated"
     else:
         lead = f"{model} beats your baseline, but it's unrated"
     return (
@@ -959,15 +959,17 @@ def _fmt_candidate_saving(pct_val: Decimal) -> str:
     Positive pct_val means cheaper than baseline  -> "X.X% lower".
     Negative pct_val means more expensive          -> "X.X% higher".
 
-    Rounds via :func:`frugon.cost._display_pct` — the SAME Decimal
-    ROUND_HALF_UP quantizer the selector's display-precision tie-break reads
+    Rounds via :func:`frugon.cost._display_pct` — the SAME Decimal quantizer
+    the selector's display-precision tie-break reads
     (:func:`frugon.cost._select_cheapest_eligible`) — rather than Python's
-    binary-float ``.1f`` (round-half-to-EVEN), which disagrees with
-    ROUND_HALF_UP at exact .x5 boundaries (e.g. 37.25 -> "37.2" under
-    round-half-even vs "37.3" under ROUND_HALF_UP).  Routing both the selector
-    and every renderer through one shared quantizer is what makes the
-    selector's tie-set PROVABLY the same set a reader sees printed — the whole
-    point of the caption-truth invariant.
+    binary-float ``.1f`` (round-half-to-EVEN).  ``_display_pct`` floors
+    (truncates toward zero) a positive percent instead of rounding it, so a
+    "lower" (saving) figure is never overstated (e.g. 37.96 -> "37.9% lower",
+    not "38.0% lower"); a negative percent ("higher") keeps ROUND_HALF_UP,
+    unaffected by the floor rule.  Routing both the selector and every
+    renderer through one shared quantizer is what makes the selector's
+    tie-set PROVABLY the same set a reader sees printed — the whole point of
+    the caption-truth invariant.
     """
     quantized = _display_pct(pct_val)
     if quantized >= 0:
@@ -1308,9 +1310,11 @@ def _reconciled_delta_pct(
     """Quantize *current* and *projected* to their _fmt_usd display precision, then
     derive the saving percent from the quantized values.
 
-    Contract: the returned *pct* equals ``round(printed_save / printed_current * 100, 1)``
+    Contract: the returned *pct* equals ``_display_pct(printed_save / printed_current * 100)``
     for the dollar figures actually printed by ``_fmt_usd``, so the percent on screen
-    is always verifiable from the adjacent Current and After numbers.
+    is always verifiable from the adjacent Current and After numbers, and — via
+    :func:`frugon.cost._display_pct` — floored (never rounded up) whenever it is a
+    positive saving.
 
     Precision tiers mirror :func:`_fmt_usd`:
       * amount < $0.0001  → 6 dp
@@ -1339,11 +1343,11 @@ def _reconciled_delta_pct(
         return cur_q, proj_q, Decimal("0.0")
 
     saved = cur_q - proj_q
-    # Compute to full Decimal precision then round to 1 dp, matching the display
-    # format ``f"{float(pct):.1f}%"`` used at every call site.
-    pct = (saved / cur_q * Decimal("100")).quantize(
-        Decimal("0.1"), rounding=ROUND_HALF_UP
-    )
+    # Compute to full Decimal precision then floor to 1 dp via the single shared
+    # saving-% formatter (:func:`frugon.cost._display_pct`) — the same quantizer
+    # every other displayed saving percent goes through, so this reconciliation
+    # source cannot drift from the floor-never-round-up rule.
+    pct = _display_pct(saved / cur_q * Decimal("100"))
     return cur_q, proj_q, pct
 
 
@@ -1521,7 +1525,7 @@ def _render_split_panel(result: AnalysisResult, split: SplitRouting) -> None:
     # printed SAVING reconciles with the printed Current and New.
     saved = fig.saved
     total_pct = fig.total_pct
-    pct = f"{float(total_pct):.1f}%"
+    pct = f"{_display_pct(total_pct):.1f}%"
     body.append("SAVING".ljust(_PANEL_LABEL_WIDTH), style=f"bold {SAVING_GREEN}")
     body.append(f"{_fmt_usd(saved)}{suffix}", style=f"bold {SAVING_GREEN}")
     body.append("    ·    ", style="dim")
@@ -1888,7 +1892,7 @@ def _render_split_upper_bound_row(
     upper = Text("a full swap to ", style="dim")
     upper.append(result.candidate_model, style=BRAND_CYAN)
     upper.append(
-        f" saves ~{float(wholesale_saving):.1f}% — {hint}",
+        f" saves ~{_display_pct(wholesale_saving):.1f}% — {hint}",
         style="dim",
     )
     _print_hanging(upper, hang=_LABEL_HANG, prefix=_label_prefix("Upper bound"))
@@ -2081,8 +2085,8 @@ def _render_split_verbose(result: AnalysisResult, split: SplitRouting) -> None:
             upper = Text("moving every call to ", style="dim")
             upper.append(result.candidate_model, style=BRAND_CYAN)
             upper.append(
-                f" saves ~{float(wholesale_saving):.1f}% — the aggressive end; "
-                f"the {float(split_total_pct):.1f}% split above is the conservative, "
+                f" saves ~{_display_pct(wholesale_saving):.1f}% — the aggressive end; "
+                f"the {_display_pct(split_total_pct):.1f}% split above is the conservative, "
                 "quality-respecting recommendation. Quality-check the full swap: ",
                 style="dim",
             )
@@ -2304,7 +2308,7 @@ def _render_wholesale_panel(result: AnalysisResult) -> None:
     # every figure in the panel reconciles to the full dataset.  Guard the
     # zero-total edge so a degenerate fixture cannot divide by zero.
     total_pct = (saved / current * Decimal("100")) if current else Decimal("0")
-    pct = f"{float(total_pct):.1f}%"
+    pct = f"{_display_pct(total_pct):.1f}%"
     body.append("SAVING".ljust(_PANEL_LABEL_WIDTH), style=f"bold {SAVING_GREEN}")
     body.append(f"{_fmt_usd(saved)}{suffix}", style=f"bold {SAVING_GREEN}")
     body.append("    ·    ", style="dim")
@@ -3069,9 +3073,9 @@ def _promotion_message(promo: _Promotion) -> str:
     """
     return (
         f"{promo.candidate} held quality on your data "
-        f"({promo.held:,}/{promo.scored:,}) — and at {float(promo.cand_pct):.1f}% "
+        f"({promo.held:,}/{promo.scored:,}) — and at {_display_pct(promo.cand_pct):.1f}% "
         f"it saves more than the recommended {promo.headline_model} "
-        f"({float(promo.headline_pct):.1f}%). Now that it's verified, it's the "
+        f"({_display_pct(promo.headline_pct):.1f}%). Now that it's verified, it's the "
         f"better route: re-run with --candidates {promo.candidate} to switch."
     )
 
@@ -4745,8 +4749,8 @@ def _md_upper_bound_lines(result: AnalysisResult) -> list[str]:
     split_total_pct = _split_report_figures(result, result.split).total_pct
     return [
         f"_Upper bound: moving every call to `{result.candidate_model}` saves "
-        f"~{float(upper):.1f}% — the aggressive end; the "
-        f"~{float(split_total_pct):.1f}% split above is the conservative, "
+        f"~{_display_pct(upper):.1f}% — the aggressive end; the "
+        f"~{_display_pct(split_total_pct):.1f}% split above is the conservative, "
         "quality-respecting recommendation (a full swap is a larger quality change)._"
     ]
 
@@ -5329,7 +5333,7 @@ def _render_markdown_split(
         "",
         f"**Route {split.routed_count:,} of {result.priced_calls:,} analyzed calls "
         f"(`{split.baseline_model}` easy calls) to `{split.candidate_model}` "
-        f"{_tol}— save ~{float(fig.total_pct):.1f}% "
+        f"{_tol}— save ~{_display_pct(fig.total_pct):.1f}% "
         f"({current_val}{unit} → {blended_val}{unit}).**",
         "",
         _md_projection_caveat_line(
@@ -5371,7 +5375,7 @@ def _render_markdown_split(
         f"| **Blended** | **{result.priced_calls:,}** | **100.0%** | — "
         f"| **{_fmt_usd(fig.blended)}** |",
         "",
-        f"**You save {_fmt_usd(fig.saved)}{unit} (−{float(fig.total_pct):.1f}%).**",
+        f"**You save {_fmt_usd(fig.saved)}{unit} (−{_display_pct(fig.total_pct):.1f}%).**",
         "",
     ]
 
@@ -6381,8 +6385,8 @@ def _render_html_v1_split_body(
         upper_note = (
             '<p class="projection-note">Upper bound: moving every call to '
             f'<span class="model-name">{esc(result.candidate_model or "")}</span> '
-            f"saves ~{float(upper):.1f}% &mdash; the aggressive end; the "
-            f"~{float(fig.total_pct):.1f}% split shown is the conservative, "
+            f"saves ~{_display_pct(upper):.1f}% &mdash; the aggressive end; the "
+            f"~{_display_pct(fig.total_pct):.1f}% split shown is the conservative, "
             "quality-respecting recommendation (a full swap is a larger quality change).</p>"
         )
 
@@ -6477,7 +6481,7 @@ def _render_html_v1_split_body(
     parts.append(
         '<div class="card">'
         '<div class="eyebrow">Split routing</div>'
-        f'<div class="saving-hero">{float(fig.total_pct):.1f}%</div>'
+        f'<div class="saving-hero">{_display_pct(fig.total_pct):.1f}%</div>'
         f'<div class="saving-sub">estimated blended saving ({projection_label})</div>'
         + saving_sub_money
         + upper_note
@@ -7488,7 +7492,7 @@ def _render_html_v2_split_body(
     # over that total, and the routing plan carries the already-on-a-cheaper
     # bucket so the buckets sum to every analyzed call.
     fig = _split_report_figures(result, split)
-    pct_str = f"{float(fig.total_pct):.1f}%"
+    pct_str = f"{_display_pct(fig.total_pct):.1f}%"
     projection_label = esc(_projection_label(result))
 
     # Quality phrase for the hero lede and routed-row badge — three cases:
@@ -7548,8 +7552,8 @@ def _render_html_v2_split_body(
         _upper = (
             '<p class="hero-caveat">Upper bound: moving every call to '
             f'<span class="route-to">{esc(result.candidate_model or "")}</span> '
-            f"saves ~{float(_ub):.1f}% &mdash; the aggressive end; the "
-            f"~{float(fig.total_pct):.1f}% split shown is the conservative, "
+            f"saves ~{_display_pct(_ub):.1f}% &mdash; the aggressive end; the "
+            f"~{_display_pct(fig.total_pct):.1f}% split shown is the conservative, "
             "quality-respecting recommendation.</p>"
         )
 
@@ -7595,7 +7599,7 @@ def _render_html_v2_split_body(
     # amounts ≥ $0.01, the Cost-by-model formatter) and the section spans the full
     # content width so the figures ("$496.72") sit INSIDE the table rather than
     # overrunning a half-rail track.
-    unit_pct = f"{float(fig.total_pct):.1f}%"
+    unit_pct = f"{_display_pct(fig.total_pct):.1f}%"
 
     # Per-bucket share of total analyzed calls.  The SHARE column reclaims the
     # space freed by rebalancing the column widths (the MODEL/STATUS dead band):

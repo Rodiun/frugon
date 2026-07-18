@@ -472,39 +472,42 @@ class TestCaptionTruthInvariant:
             "data has drifted and the caption-truth tests need a new fixture"
         )
 
-    def test_renderer_and_selector_quantize_identically_at_an_x5_boundary(
+    def test_renderer_and_selector_quantize_identically_at_a_floor_boundary(
         self,
     ) -> None:
-        """P1-1 regression pin: a genuine .x5 boundary must round the SAME way
-        through the selector's Decimal quantizer and the renderer's printed
-        string — proving selector-tie <=> printed-string equality.
+        """P1-1 regression pin (re-pinned for the floor-never-round-up rule):
+        a genuine boundary must round the SAME way through the selector's
+        Decimal quantizer and the renderer's printed string — proving
+        selector-tie <=> printed-string equality survives the switch from
+        ROUND_HALF_UP to floor (truncate toward zero) for positive saving %.
 
-        37.25 is exactly the boundary where binary-float ``.1f`` (round-half-
-        to-EVEN: "37.2") disagrees with Decimal ROUND_HALF_UP ("37.3"). Two
-        candidates whose raw saving_pct both round to 37.25 must render the
-        IDENTICAL cell string (proving they are the same printed tie the
-        selector's tie-break key also sees) at the ROUND_HALF_UP answer, not
-        the round-half-even one.
+        37.26 is a clean divergence point: naive binary-float ``.1f`` rounds it
+        to "37.3" (nearest tenth), and the retired ROUND_HALF_UP quantizer also
+        gave "37.3" — but the floor rule now in force truncates to "37.2", so
+        the saving is never overstated. Two candidates whose raw saving_pct
+        both floor to the SAME 1dp cell must render the IDENTICAL cell string
+        (proving they are the same tie the selector's tie-break key also
+        sees).
         """
         from frugon.cost import _display_pct
 
-        a = Decimal("37.25")
-        b = Decimal("37.2500001")  # rounds to the same 1dp cell as `a`
-        assert _display_pct(a) == _display_pct(b) == Decimal("37.3")
+        a = Decimal("37.26")
+        b = Decimal("37.2999999")  # floors to the same 1dp cell as `a`
+        assert _display_pct(a) == _display_pct(b) == Decimal("37.2")
         cell_a = _fmt_candidate_saving(a)
         cell_b = _fmt_candidate_saving(b)
-        assert cell_a == cell_b == "37.3% lower", (
+        assert cell_a == cell_b == "37.2% lower", (
             f"selector-tie candidates rendered DIFFERENT cells: {cell_a!r} vs "
-            f"{cell_b!r} — the renderer and selector have diverged at an .x5 "
+            f"{cell_b!r} — the renderer and selector have diverged at a floor "
             "boundary"
         )
-        # The old float `.1f` behaviour (round-half-to-EVEN) would have printed
-        # "37.2%" here — pin that the renderer is NOT doing that any more.
-        assert f"{float(a):.1f}" == "37.2", (
-            "fixture precondition: 37.25 must be a genuine round-half-even vs "
-            "ROUND_HALF_UP divergence point, or this test proves nothing"
+        # Neither the retired ROUND_HALF_UP quantizer nor naive binary-float
+        # `.1f` floors here — both would print "37.3%", overstating the saving.
+        assert f"{float(a):.1f}" == "37.3", (
+            "fixture precondition: 37.26 must round UP under naive float "
+            "formatting, or this test proves nothing about the floor fix"
         )
-        assert "37.2%" not in cell_a
+        assert "37.3%" not in cell_a
 
     def test_tier_label_present_on_every_row(self) -> None:
         """Every row carries a tier_label so the tie-break is visible in the table."""
