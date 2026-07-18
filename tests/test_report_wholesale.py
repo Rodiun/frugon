@@ -373,6 +373,95 @@ class TestWholesaleNoCandidate:
         assert FUNNEL_URL not in out
 
 
+class TestWholesaleNoPriceableCandidates:
+    """State (b): an all-unpriced --candidates pool never ran a cost race.
+
+    Distinct from TestWholesaleNoCandidate's state (a) — "evaluated, none
+    cheaper" — where the race ran and every candidate lost.  A local or
+    otherwise unlisted model landing on the old wording would read as an
+    evaluated-and-lost verdict when frugon simply had no list price to project
+    against (the live bug: ``--candidates "ollama/llama3.2:1b"``).
+    """
+
+    def test_states_no_list_price_not_no_cheaper_candidate(self, capsys: Any) -> None:
+        result = _result_no_candidate(
+            no_priceable_candidates=True,
+            unpriced_candidate_names=["ollama/llama3.2:1b"],
+        )
+        render_terminal(result)
+        out = " ".join(capsys.readouterr().out.split())
+        assert "no list price for ollama/llama3.2:1b" in out
+        assert "no cheaper candidate found" not in out
+        # Still no phantom saving.
+        assert "SAVING" not in out
+        assert "New spend" not in out
+
+    def test_names_every_unpriced_candidate(self, capsys: Any) -> None:
+        result = _result_no_candidate(
+            no_priceable_candidates=True,
+            unpriced_candidate_names=["ollama/llama3.2:1b", "ollama/mistral"],
+        )
+        render_terminal(result)
+        out = " ".join(capsys.readouterr().out.split())
+        assert "ollama/llama3.2:1b, ollama/mistral" in out
+
+    def test_notes_local_models_cost_zero_without_fabricating_a_price(
+        self, capsys: Any
+    ) -> None:
+        result = _result_no_candidate(
+            no_priceable_candidates=True,
+            unpriced_candidate_names=["ollama/llama3.2:1b"],
+        )
+        render_terminal(result)
+        out = " ".join(capsys.readouterr().out.split())
+        assert "Local models cost $0 in API spend" in out
+        assert "won't fabricate a price" in out
+
+    def test_evaluated_none_cheaper_state_is_unaffected(self, capsys: Any) -> None:
+        """Regression: the default (no_priceable_candidates=False) path is untouched."""
+        render_terminal(_result_no_candidate())
+        out = " ".join(capsys.readouterr().out.split())
+        assert "no cheaper candidate found" in out
+        assert "no list price for" not in out
+
+    def test_mixed_pool_keeps_existing_unpriced_tag_behaviour(
+        self, tmp_path: Any, capsys: Any
+    ) -> None:
+        """State (c): a mixed pool (one priced winner, one unpriced candidate)
+        still races and recommends — the existing "unpriced" row tag, not the
+        state (b) "no list price" wording, which is reserved for a pool with
+        NO priceable candidate at all."""
+        import json
+
+        records = [
+            {
+                "model": "gpt-4-turbo",
+                "request": {
+                    "messages": [{"role": "user", "content": "classify this ticket"}]
+                },
+                "response": {
+                    "choices": [{"message": {"role": "assistant", "content": "billing"}}]
+                },
+                "usage": {"prompt_tokens": 200, "completion_tokens": 5},
+            }
+            for _ in range(100)
+        ]
+        log = tmp_path / "mixed.jsonl"
+        log.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+        from frugon.cost import analyze_logs
+
+        result = analyze_logs(
+            log, candidates=["gpt-4o-mini", "imaginary-model-9999"]
+        )
+        assert result.no_priceable_candidates is False
+        assert result.candidate_model == "gpt-4o-mini"
+        render_terminal(result)
+        out = " ".join(capsys.readouterr().out.split())
+        assert "unpriced" in out
+        assert "no list price for" not in out
+
+
 def test_reconciliation_current_minus_new_equals_saving() -> None:
     """Current - New == SAVING, and accounting sums to analyzed (the invariant)."""
     from frugon.report import _wholesale_accounting, _wholesale_current_and_new
