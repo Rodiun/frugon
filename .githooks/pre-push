@@ -14,9 +14,23 @@ set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
 
-# Reads the pushed refs from stdin, which git hands to this hook.
+# git hands the pushed refs to this hook on stdin; cache them so we can both
+# inspect them here and re-feed them to the attribution guard below.
+STDIN_REFS="$(cat)"
+
+# Deletion-only pushes publish no code: every ref line carries an all-zero
+# local sha. Running the full CI suite for them is pure waste (a merged-branch
+# cleanup costing a full suite run, observed 2026-07-19). Skip both gates —
+# nothing is being published, and the attribution guard skips deletes anyway.
+if [ -n "$STDIN_REFS" ] && ! printf '%s
+' "$STDIN_REFS" | awk '{print $2}' | grep -qv '^0*$'; then
+  echo "── pre-push: deletion-only push, nothing published — skipping gates ──"
+  exit 0
+fi
+
 echo "── pre-push: checking commit attribution ──"
-"$ROOT/scripts/check-commit-attribution.sh"
+printf '%s
+' "$STDIN_REFS" | "$ROOT/scripts/check-commit-attribution.sh"
 
 echo "── pre-push: running local CI gate (mirrors ci.yml) ──"
 "$ROOT/scripts/ci-local.sh"
