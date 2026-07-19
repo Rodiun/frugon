@@ -230,12 +230,23 @@ class Comparison:
     counts).  It lets a verbose view show WHICH sampled prompts the candidate
     lost on, not just how many.  Empty when no judge ran, so non-judge callers
     and their tests are unaffected.
+
+    ``both_failed`` is aligned 1:1 with ``verdicts`` too, and is meaningful ONLY
+    where the corresponding verdict is "tie": the pairwise judge's TIE means "no
+    MATERIAL difference", which is silent about whether both sides tied because
+    they were equally GOOD or because they equally FAILED to address the prompt
+    (see :func:`_judge_addressed`).  ``True`` means a pointwise check found
+    NEITHER the baseline nor this candidate addressed the prompt — a shared
+    failure the pairwise TIE alone would hide.  Elements for a non-"tie" verdict
+    are always ``False`` (the pointwise check never runs for win/loss/error).
+    Empty when no judge ran, matching ``verdicts``.
     """
 
     record: LogRecord
     current_output: SampledOutput
     candidate_outputs: list[SampledOutput]
     verdicts: list[str] = field(default_factory=list)
+    both_failed: list[bool] = field(default_factory=list)
 
 
 @dataclass
@@ -1389,6 +1400,107 @@ def _judge_pair(
 
 
 # ---------------------------------------------------------------------------
+# Pointwise "did this answer address the prompt at all" check
+# ---------------------------------------------------------------------------
+#
+# The pairwise judge (_judge_pair) is instructed to "Default to TIE" whenever
+# there is no MATERIAL difference between two outputs.  That instruction is
+# silent about WHY there was no difference: a TIE covers both "both outputs are
+# equally good" and "both outputs equally failed to address the prompt" — the
+# latter is a shared failure the pairwise verdict alone hides.  This is a
+# SEPARATE, single-response, absolute (non-comparative) check run ONLY when the
+# pairwise verdict comes back "tie", to close that blind spot without touching
+# the calibrated pairwise preference signal itself.
+
+ADDRESS_PROMPT_TEMPLATE = (
+    "You are checking whether an answer engages with a user's prompt at all —\n"
+    "NOT how good the answer is, only whether it attempts to address what was\n"
+    "asked.\n\n"
+    "USER PROMPT:\n{prompt}\n\n"
+    "ANSWER:\n{output}\n\n"
+    "Does the answer attempt to address the prompt? Answer NO only when the\n"
+    "answer is blank, refuses without attempting the task, or is entirely\n"
+    "unrelated to the prompt. When in doubt, answer YES.\n\n"
+    'Answer with ONE line and nothing else: "ADDRESSED: YES" or "ADDRESSED: NO".\n'
+    "No explanation. No parentheses."
+)
+
+_ADDRESSED_RE = re.compile(r"ADDRESSED:\s*(YES|NO)\b", re.IGNORECASE)
+
+
+def _parse_addressed(text: str) -> bool | None:
+    """Extract the YES/NO answer from a raw pointwise-check reply.
+
+    Returns True/False when an "ADDRESSED: YES|NO" line appears anywhere in
+    *text*, else None so the caller can apply its own honest default for a
+    genuinely unparseable reply (see :func:`_judge_addressed`).
+    """
+    match = _ADDRESSED_RE.search(text)
+    if match is None:
+        return None
+    return match.group(1).upper() == "YES"
+
+
+def _judge_addressed(
+    litellm_mod: Any,
+    judge_model: str,
+    messages: list[dict[str, str]],
+    output_content: str,
+    *,
+    max_retries: int = _JUDGE_MAX_RETRIES,
+    backoff_s: float = _JUDGE_RETRY_BACKOFF_S,
+    usage_sink: list[MeasureCallUsage] | None = None,
+) -> bool:
+    """Ask *judge_model* whether *output_content* attempts to address the prompt.
+
+    Independent of the pairwise judge — used only to check a candidate TIE for
+    a SHARED failure (see the module comment above).  Ambiguous/unparseable
+    replies and a transient fault that exhausts retries default to True
+    (addressed): the check exists to catch an UNAMBIGUOUS double-failure, not
+    to second-guess a plausible attempt, so the honest default errs toward NOT
+    flagging a false "both failed" that the raw outputs would not support.
+
+    *usage_sink*, when provided, accumulates one :class:`MeasureCallUsage` per
+    call that RETURNED — mirroring :func:`_judge_pair`'s cost-disclosure
+    contract exactly, so a pointwise check's cost is never silently dropped
+    from the run's reported spend.
+    """
+    prompt_text = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
+    judge_messages = [
+        {
+            "role": "user",
+            "content": ADDRESS_PROMPT_TEMPLATE.format(
+                prompt=prompt_text, output=output_content
+            ),
+        }
+    ]
+    attempts = max(0, max_retries) + 1
+    for attempt in range(attempts):
+        try:
+            response = litellm_mod.completion(
+                model=_route_for_measure(judge_model), messages=judge_messages
+            )
+        except Exception:
+            if attempt + 1 < attempts:
+                if backoff_s > 0:
+                    time.sleep(backoff_s)
+                continue
+            return True  # exhausted retries: honest default, never flag on a fault
+        if usage_sink is not None:
+            pt, ct = _extract_usage(response)
+            usage_sink.append(
+                MeasureCallUsage(
+                    model=judge_model, prompt_tokens=pt, completion_tokens=ct
+                )
+            )
+        text: str = response.choices[0].message.content or ""
+        addressed = _parse_addressed(text)
+        return addressed if addressed is not None else True
+    # Unreachable: the loop always returns.  Present for exhaustiveness.
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -1531,6 +1643,10 @@ def run_measure(
         [None] * n_candidates for _ in range(n_prompts)
     ]
     verdicts_by_prompt: list[list[str]] = [[] for _ in range(n_prompts)]
+    # Parallel to verdicts_by_prompt; set True ONLY for a "tie" verdict whose
+    # pointwise check found neither side addressed the prompt (see the module
+    # comment above _judge_addressed).  Stays False for every other verdict.
+    both_failed_by_prompt: list[list[bool]] = [[] for _ in range(n_prompts)]
 
     # Pre-draw the full A/B layout BEFORE any task runs, from a seeded RNG that is
     # independent of (but derived from) the sampling seed.  Drawing it up front in
@@ -1546,6 +1662,8 @@ def run_measure(
         ]
         for row in verdicts_by_prompt:
             row.extend([""] * n_candidates)
+        for bf_row in both_failed_by_prompt:
+            bf_row.extend([False] * n_candidates)
 
     # Progress callbacks fire as each prompt finishes its sampling / judging.  A
     # lock makes the fire atomic; the reported counter is taken under the lock so
@@ -1609,13 +1727,19 @@ def run_measure(
         # itself fails after retry, and the downstream tally already routes it
         # to the errors column, so the unified treatment is correct.
         baseline_errored = cur_out.error is not None
+        # Lazily computed and cached across this prompt's candidates: the
+        # baseline output is the SAME for every candidate on this prompt, so a
+        # baseline that ties against more than one candidate only needs ONE
+        # pointwise check, not one per tie.  None means "not yet computed" —
+        # distinct from a real False/True result.
+        baseline_addressed: bool | None = None
         for c_idx in range(n_candidates):
             cand_out = candidate_outs_by_prompt[p_idx][c_idx]
             assert cand_out is not None  # every candidate resolved before submit
             if baseline_errored or cand_out.error is not None:
                 verdicts_by_prompt[p_idx][c_idx] = "error"
                 continue
-            verdicts_by_prompt[p_idx][c_idx] = _judge_pair(
+            verdict = _judge_pair(
                 litellm_mod,
                 judge_model,
                 sampled[p_idx].messages,
@@ -1624,6 +1748,30 @@ def run_measure(
                 candidate_is_a=candidate_is_a[p_idx][c_idx],
                 usage_sink=local_usage,
             )
+            verdicts_by_prompt[p_idx][c_idx] = verdict
+            # Pointwise "both failed" check — ONLY on a TIE, where the pairwise
+            # judge's verdict is silent about whether the tie is two equally
+            # GOOD outputs or two equally FAILED ones (see the module comment
+            # above _judge_addressed).
+            if verdict == "tie":
+                if baseline_addressed is None:
+                    baseline_addressed = _judge_addressed(
+                        litellm_mod,
+                        judge_model,
+                        sampled[p_idx].messages,
+                        cur_out.content,
+                        usage_sink=local_usage,
+                    )
+                candidate_addressed = _judge_addressed(
+                    litellm_mod,
+                    judge_model,
+                    sampled[p_idx].messages,
+                    cand_out.content,
+                    usage_sink=local_usage,
+                )
+                both_failed_by_prompt[p_idx][c_idx] = (
+                    not baseline_addressed and not candidate_addressed
+                )
         if local_usage:
             with _cb_lock:
                 judge_usage.extend(local_usage)
@@ -1692,6 +1840,7 @@ def run_measure(
             o for o in candidate_outs_by_prompt[p_idx] if o is not None
         ]
         verdicts = verdicts_by_prompt[p_idx] if use_judge else []
+        both_failed = both_failed_by_prompt[p_idx] if use_judge else []
         if use_judge:
             for c_idx, cand in enumerate(candidates):
                 verdict = verdicts[c_idx]
@@ -1710,6 +1859,7 @@ def run_measure(
                 current_output=cur_out,
                 candidate_outputs=cand_outs_checked,
                 verdicts=list(verdicts),
+                both_failed=list(both_failed),
             )
         )
 
@@ -1861,6 +2011,15 @@ class MeasureEstimate:
     straight from these three numbers, so the arithmetic the user reads always
     reconciles to ``planned_calls`` exactly — never to a requested sample count
     that silently exceeded the records available.
+
+    ``max_check_calls`` is the WORST-CASE count of extra pointwise "both failed"
+    calls (see :func:`_judge_addressed`): unlike the sampling/judge legs, these
+    calls are conditional on the pairwise judge actually returning a TIE, which
+    is data-dependent and unknowable before the run — so this is deliberately an
+    upper bound, NOT folded into the exact ``planned_calls`` total.  It is 0
+    whenever ``use_judge`` is False (a TIE, and therefore the pointwise check,
+    is impossible without a judge).  Defaults to 0 so existing direct-
+    construction callers/tests are unaffected.
     """
 
     planned_calls: int
@@ -1869,6 +2028,7 @@ class MeasureEstimate:
     n_prompts: int
     n_candidates: int
     use_judge: bool
+    max_check_calls: int = 0
 
 
 def planned_call_count(
@@ -1885,6 +2045,21 @@ def planned_call_count(
     sampling = n_prompts * (1 + n_candidates)
     judging = n_prompts * n_candidates if use_judge else 0
     return sampling + judging
+
+
+def max_check_call_count(n_prompts: int, n_candidates: int, *, use_judge: bool) -> int:
+    """Return the WORST-CASE count of extra pointwise "both failed" check calls.
+
+    The pointwise check (:func:`_judge_addressed`) only runs when the pairwise
+    judge returns "tie" for a given (prompt, candidate) — a data-dependent
+    outcome unknowable before the run.  The upper bound assumes EVERY candidate
+    on EVERY prompt ties: for one prompt that is 1 baseline check (cached and
+    shared across that prompt's candidates — see :func:`run_measure`) plus one
+    check per candidate, i.e. ``1 + n_candidates`` — the SAME per-prompt shape
+    as a sampling call, summed over ``n_prompts``.  Zero when *use_judge* is
+    False (no judge means no TIE, means no pointwise check can ever fire).
+    """
+    return n_prompts * (1 + n_candidates) if use_judge else 0
 
 
 def estimate_measure_cost(
@@ -1931,6 +2106,7 @@ def estimate_measure_cost(
     n_prompts = len(sampled)
     n_candidates = len(candidates)
     planned = planned_call_count(n_prompts, n_candidates, use_judge=use_judge)
+    max_checks = max_check_call_count(n_prompts, n_candidates, use_judge=use_judge)
 
     # Resolve and cache each target model's price once.  None marks an unpriced
     # model — its legs contribute nothing and the name is surfaced.
@@ -1986,4 +2162,5 @@ def estimate_measure_cost(
         n_prompts=n_prompts,
         n_candidates=n_candidates,
         use_judge=use_judge,
+        max_check_calls=max_checks,
     )

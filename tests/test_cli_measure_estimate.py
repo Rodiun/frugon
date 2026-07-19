@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 from decimal import Decimal
 
 import pytest
@@ -175,15 +176,24 @@ def test_large_run_estimate_names_judge_when_judge_set(
         env=_WIDE_ENV,
     )
     assert result.exit_code == 0, result.output
-    # Judge form: exact count (no ``~``) + a colon, then both legs, then the cost
-    # as its own sentence.  Both summands reconcile to 60: 40 sample + 20 judge.
+    # Judge form: exact count (no ``~``) + a colon, then both legs, then the
+    # worst-case pointwise-check clause, then the cost as its own sentence.
+    # Both summands reconcile to 60: 40 sample + 20 judge.  The check clause is
+    # "up to" — 20 prompts × (1 baseline + 1 candidate) = 40 — since it only
+    # fires on an actual TIE, unknowable before the run.  The longer sentence
+    # now sits right at the 200-column test width, so Rich may word-wrap it
+    # (a real newline replacing the space it broke at) — collapse whitespace
+    # runs before matching so the assertion is robust to where exactly that
+    # wrap lands, without weakening what it actually checks.
+    flat = re.sub(r"\s+", " ", result.output)
     assert (
         "About to make 60 provider calls: "
         "40 to sample (20 prompts × 2 models: baseline + 1 candidate)"
-        " + 20 to judge (20 prompts × 1 candidate). "
+        " + 20 to judge (20 prompts × 1 candidate), "
+        "up to 40 more to check ties for shared failure. "
         "Estimated cost ~$"
-    ) in result.output
-    assert "on your keys." in result.output
+    ) in flat
+    assert "on your keys." in flat
     # ESTIMATE-LINE separators are colon/period only — never an em-dash (reads as
     # a minus sign).  Scoped to the estimate line: the report body above it
     # legitimately carries one in its dim "Upper bound … —" note.

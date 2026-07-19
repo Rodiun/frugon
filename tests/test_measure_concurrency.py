@@ -668,7 +668,8 @@ def test_run_measure_sampling_stage_reaches_full_concurrency() -> None:
     """Arrange: n_prompts large relative to N, concurrency=N, judge ON.  Every
     sampling call brackets itself in a thread-safe in-flight gauge that records
     its running maximum; the gauge counts SAMPLING calls only (judge calls go
-    through the separate _judge_pair patch and do not touch it).
+    through the separate _judge_pair / _judge_addressed patches and do not
+    touch it).
 
     Act: run_measure (two-stage pipeline) with concurrency=N.
 
@@ -702,7 +703,11 @@ def test_run_measure_sampling_stage_reaches_full_concurrency() -> None:
         patch("frugon.measure._import_litellm", return_value=mock_litellm),
         # Judge calls do NOT touch the gauge, so the measured peak is sampling
         # concurrency ALONE — proving sampling reaches N independent of judging.
+        # _judge_pair always returns "tie", which would otherwise trigger the
+        # pointwise "both failed" check (_judge_addressed) — also stubbed here
+        # so its calls stay out of the gauge too, same isolation as _judge_pair.
         patch("frugon.measure._judge_pair", side_effect=lambda *a, **k: "tie"),
+        patch("frugon.measure._judge_addressed", side_effect=lambda *a, **k: True),
     ):
         run_measure(
             records,

@@ -403,7 +403,11 @@ def test_run_measure_captures_sampling_and_judge_usage(
         seed=7,
     )
     # 3 prompts × (1 baseline + 1 candidate) sampling = 6 ; 3 prompts × 1 judge = 3.
-    assert len(result.measure_calls) == 9
+    # Every judge call ties ("VERDICT: TIE" from the mock), so the pointwise
+    # "both failed" check also fires for every prompt: 1 baseline check
+    # (cached per prompt) + 1 candidate check = 2, × 3 prompts = 6.
+    # 6 + 3 + 6 = 15.
+    assert len(result.measure_calls) == 15
     # Every captured call carries the stubbed usage (7 in / 3 out).
     assert all(c.prompt_tokens == 7 and c.completion_tokens == 3 for c in result.measure_calls)
 
