@@ -2432,6 +2432,87 @@ class TestMultiCandidateProjections:
         assert single.total_cost == multi.total_cost
 
 
+class TestNoPriceableCandidates:
+    """AnalysisResult.no_priceable_candidates -- state (b) of the three-state
+    no-candidate distinction (report._render_wholesale_panel and its md/html
+    counterparts): (a) evaluated, none cheaper; (b) no priceable candidate in
+    the pool (the cost race never ran); (c) a mixed pool (existing "unpriced"
+    tag behaviour, untouched by this flag).
+    """
+
+    def _gpt4t_log(self, tmp_path: Path) -> Path:
+        """100 gpt-4-turbo calls -- mirrors TestMultiCandidateProjections._gpt4t_log."""
+        records = [
+            {
+                "model": "gpt-4-turbo",
+                "request": {
+                    "messages": [
+                        {"role": "user", "content": "classify this support ticket"}
+                    ]
+                },
+                "response": {
+                    "choices": [
+                        {"message": {"role": "assistant", "content": "billing"}}
+                    ]
+                },
+                "usage": {"prompt_tokens": 200, "completion_tokens": 5},
+            }
+            for _ in range(100)
+        ]
+        return _write_jsonl(records, tmp_path)
+
+    def test_single_unpriced_candidate_flags_no_priceable_candidates(
+        self, tmp_path: Path
+    ) -> None:
+        """--candidates with ONE model that has no list price (e.g. a local
+        model) -- the bug scenario from the live report: candidate_model is
+        None, but the cost race never ran, so no_priceable_candidates is True."""
+        result = analyze_logs(
+            self._gpt4t_log(tmp_path), candidates=["ollama/llama3.2:1b"]
+        )
+        assert result.candidate_model is None
+        assert result.no_priceable_candidates is True
+        assert result.unpriced_candidate_names == ["ollama/llama3.2:1b"]
+
+    def test_multi_all_unpriced_candidates_flags_no_priceable_candidates(
+        self, tmp_path: Path
+    ) -> None:
+        """Every explicit candidate unpriced -- still no priceable candidate,
+        names preserved in user-supplied order."""
+        result = analyze_logs(
+            self._gpt4t_log(tmp_path),
+            candidates=["imaginary-model-9999", "another-fake-model"],
+        )
+        assert result.candidate_model is None
+        assert result.no_priceable_candidates is True
+        assert result.unpriced_candidate_names == [
+            "imaginary-model-9999",
+            "another-fake-model",
+        ]
+
+    def test_mixed_pool_does_not_flag_no_priceable_candidates(
+        self, tmp_path: Path
+    ) -> None:
+        """State (c): at least one candidate priced -- the race ran, so this is
+        NOT state (b), even when the priced candidate loses to the baseline and
+        another candidate is unpriced."""
+        result = analyze_logs(
+            self._gpt4t_log(tmp_path),
+            candidates=["gpt-4o", "imaginary-model-9999"],
+        )
+        assert result.no_priceable_candidates is False
+        assert result.unpriced_candidate_names == ["imaginary-model-9999"]
+
+    def test_default_pool_never_flags_no_priceable_candidates(
+        self, tmp_path: Path
+    ) -> None:
+        """No explicit --candidates: the built-in pool is always fully priced."""
+        result = analyze_logs(self._gpt4t_log(tmp_path))
+        assert result.used_default_pool is True
+        assert result.no_priceable_candidates is False
+        assert result.unpriced_candidate_names == []
+
+
 class TestCandidateProjectionSplitBasis:
     """Candidate projections use SPLIT basis (not full-swap) and sign reads correctly."""
 

@@ -23,7 +23,7 @@ import json
 import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -229,6 +229,17 @@ class AnalysisResult:
     # itself).  Headline projection math is unchanged — each entry is computed
     # alongside the existing cheapest-wins loop, additive only.
     candidate_projections: list[CandidateProjection] = field(default_factory=list)
+    # True when the user passed explicit --candidates and NONE of them carry a
+    # known list price -- the cost race never ran.  Distinct from
+    # ``candidate_model is None`` on its own, which also covers "raced and
+    # every candidate lost" (state (a): at least one candidate WAS priced).
+    # Always False for the default pool -- every entry in _ROUTING_CANDIDATES
+    # is priced (see tests/test_candidate_pool.py for the roster invariant).
+    no_priceable_candidates: bool = False
+    # The explicit --candidates the user passed that have no known list price,
+    # in the order supplied.  Populated alongside no_priceable_candidates so
+    # the report can name them without re-deriving pricing lookups.
+    unpriced_candidate_names: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -887,8 +898,25 @@ def _display_pct(pct: Decimal) -> Decimal:
     would be provably false the moment two candidates print the identical
     percent but differ in the 5th decimal place (the exact defect this
     function exists to close).
+
+    Floors (truncates toward zero) a positive *pct* instead of rounding it,
+    so the displayed saving is never higher than the exact computed value —
+    the roadmap promise "Saving-percent display — floor, never round up"
+    (49.96% must print "49.9%", not "50.0%"). Zero and negative values (no
+    saving, or a cost increase) keep ROUND_HALF_UP: flooring only guards
+    against overstating a SAVING, so it must not also make a displayed
+    increase look smaller by rounding it toward zero.
+
+    Reconciling-invariant note: when *pct* is derived from already-rounded
+    dollar components (``saved / current * 100`` on the printed Current/New
+    figures — see ``report._reconciled_delta_pct`` / ``_split_report_figures``),
+    a floored result is always <= that exact ratio, so ``SAVING == Current -
+    New`` still holds on the printed dollars and this function only ever
+    makes the adjacent printed PERCENT more conservative, never inconsistent
+    with it.
     """
-    return pct.quantize(_DISPLAY_PCT_QUANTUM, rounding=ROUND_HALF_UP)
+    rounding = ROUND_DOWN if pct > Decimal("0") else ROUND_HALF_UP
+    return pct.quantize(_DISPLAY_PCT_QUANTUM, rounding=rounding)
 
 
 def _select_cheapest_eligible(
@@ -1326,6 +1354,13 @@ def analyze_records(
                         )
                     projected_cost = _swap_total
 
+    # State (b) of the priceable-pool distinction (report._render_wholesale_panel
+    # and its md/html counterparts): the user passed explicit --candidates and
+    # none of them had a known list price, so the cost race never ran.  Scoped
+    # to the explicit-candidates branch only -- cand_unpriced is never
+    # populated on the default-pool branch above, whose every entry is priced.
+    no_priceable_candidates = not cand_splits and bool(cand_unpriced)
+
     # Compute tier_drop: only defined when both baseline and candidate have known tiers.
     tier_drop: int | None = None
     if candidate_model is not None:
@@ -1568,6 +1603,8 @@ def analyze_records(
         monthly_projected=monthly_projected,
         split=split,
         candidate_projections=candidate_projections,
+        no_priceable_candidates=no_priceable_candidates,
+        unpriced_candidate_names=list(cand_unpriced),
     )
 
 

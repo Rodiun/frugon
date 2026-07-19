@@ -497,7 +497,8 @@ class TestVerboseSplitPctMatchesPanel:
                   = 2.005 - (2.000 - 1.000) = 1.005
                   → quantize(0.01, ROUND_HALF_UP) = 1.01
       raw  saving-% = (2.005 - 1.005) / 2.005 * 100 = 49.875... → 1dp "49.9%"
-      rec. saving-% = (2.01  - 1.01)  / 2.01  * 100 = 49.751... → 1dp "49.8%"
+      rec. saving-% = (2.01  - 1.01)  / 2.01  * 100 = 49.7512...
+                    → floored (never rounded up) 1dp "49.7%"
     These two differ at 1dp, proving the fixture exercises the divergence.
     """
 
@@ -605,15 +606,18 @@ class TestVerboseSplitPctMatchesPanel:
         )
         raw_pct_1dp = round(raw_pct_value, 1)  # 49.9
 
+        from frugon.cost import _display_pct
         from frugon.report import _split_report_figures
 
         fig = _split_report_figures(result, split)
         reconciled_pct_value = float(fig.total_pct)
-        reconciled_pct_1dp = round(reconciled_pct_value, 1)  # 49.8
+        # The ACTUAL displayed figure floors (truncates toward zero), not a
+        # naive round-half-even/up — this must match what every renderer prints.
+        displayed_pct = _display_pct(fig.total_pct)  # Decimal("49.7")
 
-        assert raw_pct_1dp != reconciled_pct_1dp, (
+        assert raw_pct_1dp != float(displayed_pct), (
             f"Fixture no longer exercises a 1dp divergence: "
-            f"raw={raw_pct_1dp}% reconciled={reconciled_pct_1dp}% — pick new costs."
+            f"raw={raw_pct_1dp}% displayed={displayed_pct}% — pick new costs."
         )
 
         # --- Part 2: capture both rendered surfaces. ---
@@ -622,23 +626,23 @@ class TestVerboseSplitPctMatchesPanel:
 
         # --- Part 3: extract the XX.X% the verbose note prints for "split above". ---
         # The note template is:
-        #   "the {float(split_total_pct):.1f}% split above is the conservative, ..."
+        #   "the {_display_pct(split_total_pct):.1f}% split above is the conservative, ..."
         verbose_match = re.search(r"the (\d+\.\d+)% split above", verbose_out)
         assert verbose_match is not None, (
             f"'the X.X% split above' not found in verbose output:\n{verbose_out}"
         )
-        verbose_pct_str = verbose_match.group(1) + "%"  # e.g. "49.8%"
+        verbose_pct_str = verbose_match.group(1) + "%"  # e.g. "49.7%"
 
         # --- Part 4: extract the XX.X% the panel hero prints for "% lower". ---
-        # The panel template is: f"{pct} lower" where pct = f"{float(total_pct):.1f}%"
+        # The panel template is: f"{pct} lower" where pct = f"{_display_pct(total_pct):.1f}%"
         panel_match = re.search(r"(\d+\.\d+)% lower", panel_out)
         assert panel_match is not None, (
             f"'X.X% lower' not found in panel output:\n{panel_out}"
         )
-        panel_pct_str = panel_match.group(1) + "%"  # e.g. "49.8%"
+        panel_pct_str = panel_match.group(1) + "%"  # e.g. "49.7%"
 
         # --- Part 5: the expected string from the shared helper. ---
-        expected_pct_str = f"{reconciled_pct_value:.1f}%"  # "49.8%"
+        expected_pct_str = f"{displayed_pct:.1f}%"  # "49.7%"
 
         # Both printed strings must equal the shared helper's figure.
         assert verbose_pct_str == expected_pct_str, (

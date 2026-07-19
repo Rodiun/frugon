@@ -2,6 +2,29 @@
 
 ## Changelog
 
+### Unreleased
+
+- **`--judge` and `--judge-model` now fail fast when their prerequisite is
+  missing.** Passing `--judge` without `--measure`, or `--judge-model`
+  without `--judge`, used to run the analysis and silently ignore the flag.
+  Both now error immediately with a clear message instead of quietly doing
+  nothing.
+- **Sampling failures during `--measure` now name the cause.** A drained
+  account or bad key used to surface as one generic error. frugon now tells
+  you whether it was quota exhaustion, an auth failure, or a rate limit, so
+  you know what to fix.
+- **Saving percentages now floor, never round up.** Displayed saving
+  percentages used to round to one decimal, which could nudge a figure up
+  across a boundary (e.g. 49.96% → 50.0%), marginally overstating the saving.
+  They now floor (truncate) instead, so the displayed percentage is never
+  higher than the computed saving.
+- **Local and unpriced candidate pools get an honest verdict.** Racing an
+  all-local or otherwise unpriced candidate pool used to render "no cheaper
+  candidate found," reading like an evaluated-and-lost verdict when the cost
+  race never ran. frugon now says plainly when a candidate pool has no list
+  price to race against, while still showing the full quality comparison when
+  you ran `--measure`.
+
 ### v0.2.0
 
 - **Curated recommendation roster.** The default candidate pool is now a
@@ -214,13 +237,34 @@ rather than hard-coding it — so both the auto-recommendation and the escalatio
 ladder draw from up-to-date candidates. Same offline, local-only method; users can
 always override with `--candidates`.
 
-## Saving-percent display — floor, never round up
+## Response-time / latency as a judging dimension
 
-**Today.** Displayed saving percentages are rounded to one decimal. Rounding can
-nudge a figure up across a boundary (e.g. 49.96% → 50.0%), marginally overstating
-the saving.
+**Today (the limitation).** `--judge` scores sampled responses on quality alone.
+A cheaper or local candidate that wins on quality but answers far slower is
+recommended exactly the same as one that is both cheaper and fast; latency never
+factors into the verdict.
 
-**Proposed enhancement.** Floor (truncate) displayed saving percentages so the
-shown number is never higher than the computed saving — strictly conservative, in
-keeping with the "never inflate" guarantee. Display-only; the underlying math is
-unchanged.
+**Proposed enhancement.** Capture per-sample wall-time and tokens-per-second
+during `--measure` sampling, and surface p50/p95 latency per candidate beside the
+judged quality verdict. When a cheaper or local candidate wins on quality but
+loses on latency, say so plainly in the verdict, so the tradeoff is visible
+before you route to it.
+
+## Nonce-variance stability probe
+
+**Today (the limitation).** `--measure --judge` samples each prompt once per
+candidate. A prompt is inherently non-deterministic: the same model can answer
+the identical prompt differently across separate calls, so a single sample
+cannot tell genuine prompt instability apart from ordinary decoding variance.
+
+**Proposed enhancement.** Add an opt-in probe that re-samples identical prompts
+(baseline decoding variance) alongside nonce-perturbed prompts (prompt-
+instability variance). Only variance in excess of the baseline is attributed to
+prompt instability. Opt-in because it costs extra samples; the added cost is
+disclosed up front in the pre-run estimate.
+
+## Trace ingest (under consideration)
+
+frugon is considering support for ingesting OpenInference/OTel traces as an
+additional `capture` input format, alongside the log formats it already reads.
+No timeline or commitment yet; noting it here because it keeps coming up.

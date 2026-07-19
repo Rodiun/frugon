@@ -159,8 +159,9 @@ def _escalation_detail(suggestion: EscalationSuggestion, current_model: str) -> 
     )
 
 # The two load-bearing caveats kept in the default terminal view (CLI redesign
-# point 3).  Everything else — the wholesale upper bound, the easy/hard heuristic
-# explanation, and the automated-routing upsell — moves to --verbose.
+# point 3).  Everything else — the wholesale upper bound and the easy/hard
+# heuristic explanation — moves to --verbose.  The automated-routing upsell
+# stays in the shared footer, rendered in both default and --verbose views.
 # The quality caveat is rendered as TWO deliberate lines: the assertion, then
 # the call to action on its own line beneath it.  The break is forced (not left
 # to soft-wrap) so the "run --measure …" instruction always reads as a distinct,
@@ -191,6 +192,24 @@ QUALITY_EQUAL_OR_BETTER = (
     "this is a quality-neutral or quality-improving move."
 )
 PRIVACY_CAVEAT = "Your data never leaves your machine."
+
+# Shown in place of the "no cheaper candidate found" hero when the candidate
+# pool never priced (state (b) of the three-state no-candidate distinction:
+# (a) evaluated, none cheaper; (b) no priceable candidate in the pool; (c) a
+# mixed pool, handled by the existing per-candidate "unpriced" tag).  A local
+# or otherwise unlisted model has no published API price, so the cost race
+# never ran -- this says so plainly rather than reading as an evaluated loss.
+# Always true regardless of what else the report renders.
+NO_PRICEABLE_CANDIDATES_NOTE = (
+    "Local models cost $0 in API spend, but frugon won't fabricate a price to "
+    "project a saving against."
+)
+# Appended after NO_PRICEABLE_CANDIDATES_NOTE ONLY when a quality comparison
+# actually renders below it in the same report -- see
+# _no_priceable_candidates_note_text.  Kept as its own constant (not folded
+# back into the note above) so the always-true clause and the conditional
+# clause can never drift out of sync across the five surfaces that render it.
+NO_PRICEABLE_CANDIDATES_QUALITY_CLAUSE = "The quality comparison below still covers them."
 
 # The footer privacy line for the split headline — the two clauses a buyer needs
 # at a glance.  Named (and kept) distinct from cli.PRIVACY_LINE (the fuller
@@ -450,7 +469,7 @@ def _excluded_unrated_caveat(model: str, saving_pct: Decimal | None) -> str:
     gracefully to omit the figure rather than print a bare placeholder.
     """
     if saving_pct is not None:
-        lead = f"{model} could save ~{float(saving_pct):.1f}%, but it's unrated"
+        lead = f"{model} could save ~{_display_pct(saving_pct):.1f}%, but it's unrated"
     else:
         lead = f"{model} beats your baseline, but it's unrated"
     return (
@@ -687,8 +706,9 @@ def render_terminal(
     When ``verbose=True``, each view appends the supporting detail that the
     default (pared-down) view moves out of the way: the per-model cost table plus
     a Notes block (the split's easy/hard heuristic and wholesale upper-bound, or —
-    on the wholesale view — a pointer back to the conservative split), and the
-    automated-routing upsell.
+    on the wholesale view — a pointer back to the conservative split).  The
+    automated-routing upsell is not part of this supporting detail — it lives in
+    the shared footer, rendered once regardless of ``verbose``.
 
     *judged_models* — the models this run will judge (the explicit ``--candidates``
     under ``--measure --judge``, whose quality verdict renders in the section
@@ -957,15 +977,17 @@ def _fmt_candidate_saving(pct_val: Decimal) -> str:
     Positive pct_val means cheaper than baseline  -> "X.X% lower".
     Negative pct_val means more expensive          -> "X.X% higher".
 
-    Rounds via :func:`frugon.cost._display_pct` — the SAME Decimal
-    ROUND_HALF_UP quantizer the selector's display-precision tie-break reads
+    Rounds via :func:`frugon.cost._display_pct` — the SAME Decimal quantizer
+    the selector's display-precision tie-break reads
     (:func:`frugon.cost._select_cheapest_eligible`) — rather than Python's
-    binary-float ``.1f`` (round-half-to-EVEN), which disagrees with
-    ROUND_HALF_UP at exact .x5 boundaries (e.g. 37.25 -> "37.2" under
-    round-half-even vs "37.3" under ROUND_HALF_UP).  Routing both the selector
-    and every renderer through one shared quantizer is what makes the
-    selector's tie-set PROVABLY the same set a reader sees printed — the whole
-    point of the caption-truth invariant.
+    binary-float ``.1f`` (round-half-to-EVEN).  ``_display_pct`` floors
+    (truncates toward zero) a positive percent instead of rounding it, so a
+    "lower" (saving) figure is never overstated (e.g. 37.96 -> "37.9% lower",
+    not "38.0% lower"); a negative percent ("higher") keeps ROUND_HALF_UP,
+    unaffected by the floor rule.  Routing both the selector and every
+    renderer through one shared quantizer is what makes the selector's
+    tie-set PROVABLY the same set a reader sees printed — the whole point of
+    the caption-truth invariant.
     """
     quantized = _display_pct(pct_val)
     if quantized >= 0:
@@ -1169,8 +1191,8 @@ def _render_split_terminal(
     if verbose:
         _render_cost_by_model_table(result)
         # Blank line: the "Cost by model" table and the supporting notes below
-        # (Upper bound / Method / Automate) are DISTINCT concerns — separate them
-        # so the notes don't read as extra rows of the cost table.
+        # (Upper bound / Method) are DISTINCT concerns — separate them so the
+        # notes don't read as extra rows of the cost table.
         rprint("")
         _render_split_verbose(result, split)
 
@@ -1306,9 +1328,11 @@ def _reconciled_delta_pct(
     """Quantize *current* and *projected* to their _fmt_usd display precision, then
     derive the saving percent from the quantized values.
 
-    Contract: the returned *pct* equals ``round(printed_save / printed_current * 100, 1)``
+    Contract: the returned *pct* equals ``_display_pct(printed_save / printed_current * 100)``
     for the dollar figures actually printed by ``_fmt_usd``, so the percent on screen
-    is always verifiable from the adjacent Current and After numbers.
+    is always verifiable from the adjacent Current and After numbers, and — via
+    :func:`frugon.cost._display_pct` — floored (never rounded up) whenever it is a
+    positive saving.
 
     Precision tiers mirror :func:`_fmt_usd`:
       * amount < $0.0001  → 6 dp
@@ -1337,11 +1361,11 @@ def _reconciled_delta_pct(
         return cur_q, proj_q, Decimal("0.0")
 
     saved = cur_q - proj_q
-    # Compute to full Decimal precision then round to 1 dp, matching the display
-    # format ``f"{float(pct):.1f}%"`` used at every call site.
-    pct = (saved / cur_q * Decimal("100")).quantize(
-        Decimal("0.1"), rounding=ROUND_HALF_UP
-    )
+    # Compute to full Decimal precision then floor to 1 dp via the single shared
+    # saving-% formatter (:func:`frugon.cost._display_pct`) — the same quantizer
+    # every other displayed saving percent goes through, so this reconciliation
+    # source cannot drift from the floor-never-round-up rule.
+    pct = _display_pct(saved / cur_q * Decimal("100"))
     return cur_q, proj_q, pct
 
 
@@ -1519,7 +1543,7 @@ def _render_split_panel(result: AnalysisResult, split: SplitRouting) -> None:
     # printed SAVING reconciles with the printed Current and New.
     saved = fig.saved
     total_pct = fig.total_pct
-    pct = f"{float(total_pct):.1f}%"
+    pct = f"{_display_pct(total_pct):.1f}%"
     body.append("SAVING".ljust(_PANEL_LABEL_WIDTH), style=f"bold {SAVING_GREEN}")
     body.append(f"{_fmt_usd(saved)}{suffix}", style=f"bold {SAVING_GREEN}")
     body.append("    ·    ", style="dim")
@@ -1886,7 +1910,7 @@ def _render_split_upper_bound_row(
     upper = Text("a full swap to ", style="dim")
     upper.append(result.candidate_model, style=BRAND_CYAN)
     upper.append(
-        f" saves ~{float(wholesale_saving):.1f}% — {hint}",
+        f" saves ~{_display_pct(wholesale_saving):.1f}% — {hint}",
         style="dim",
     )
     _print_hanging(upper, hang=_LABEL_HANG, prefix=_label_prefix("Upper bound"))
@@ -2044,9 +2068,11 @@ def _render_log_span_row(result: AnalysisResult) -> None:
 def _render_split_verbose(result: AnalysisResult, split: SplitRouting) -> None:
     """Verbose-only supporting detail moved out of the default split view.
 
-    Carries the wholesale upper-bound, the easy/hard heuristic explanation, and
-    the automated-routing upsell — the material the pared-down default view sends
-    here so the headline reads confident, not defensive (CLI redesign point 3).
+    Carries the wholesale upper-bound and the easy/hard heuristic explanation —
+    the material the pared-down default view sends here so the headline reads
+    confident, not defensive (CLI redesign point 3).  The automated-routing
+    upsell lives ONLY in the shared footer (:func:`_render_footer_core`), which
+    always follows this block — duplicating it here read as the site CTA twice.
     """
     # Group header — mirrors the "Cost by model" table title so the notes read
     # as their own labelled section, not orphaned rows trailing the table.
@@ -2056,7 +2082,7 @@ def _render_split_verbose(result: AnalysisResult, split: SplitRouting) -> None:
     # Accounting/Prices block, wrapping with a hanging indent under the body —
     # continuations never bleed back to the left margin.
 
-    # Order (Item 7): Upper bound -> Log span -> Method -> Automate.  The
+    # Order (Item 7): Upper bound -> Log span -> Method.  The
     # Upper-bound decision note leads; the Log-span disclosure follows it.
     # Wholesale upper-bound — the larger, less-conservative full-swap figure.
     # The quoted split percentage IS the panel hero's percent: both read
@@ -2077,8 +2103,8 @@ def _render_split_verbose(result: AnalysisResult, split: SplitRouting) -> None:
             upper = Text("moving every call to ", style="dim")
             upper.append(result.candidate_model, style=BRAND_CYAN)
             upper.append(
-                f" saves ~{float(wholesale_saving):.1f}% — the aggressive end; "
-                f"the {float(split_total_pct):.1f}% split above is the conservative, "
+                f" saves ~{_display_pct(wholesale_saving):.1f}% — the aggressive end; "
+                f"the {_display_pct(split_total_pct):.1f}% split above is the conservative, "
                 "quality-respecting recommendation. Quality-check the full swap: ",
                 style="dim",
             )
@@ -2102,14 +2128,6 @@ def _render_split_verbose(result: AnalysisResult, split: SplitRouting) -> None:
         hang=_LABEL_HANG,
         prefix=_label_prefix("Method"),
     )
-
-    # Automated-routing upsell.
-    automate = Text(
-        "frugon can route every call automatically and hold the savings for you → ",
-        style="dim",
-    )
-    automate.append("https://frugon.rodiun.io", style=BRAND_CYAN)
-    _print_hanging(automate, hang=_LABEL_HANG, prefix=_label_prefix("Automate"))
 
     rprint("")
 
@@ -2254,10 +2272,26 @@ def _render_wholesale_panel(result: AnalysisResult) -> None:
     # No cheaper candidate found — there is no swap to recommend.  Say so honestly
     # (muted, never green) and stop: no phantom "New spend $0 / SAVING 100%" line,
     # which a None candidate's zero projected_cost would otherwise produce.
+    #
+    # Two distinct honest states share this branch (never conflate them): (a)
+    # the cost race ran and every candidate lost -- "no cheaper candidate
+    # found" -- vs (b) the pool never priced at all, so there was no race to
+    # run.  A local/unlisted model landing here would otherwise read as an
+    # evaluated-and-lost verdict when frugon simply had no list price to
+    # project against.
     if not result.candidate_model:
         body.append("\n\n")
         body.append("  ")
-        body.append("no cheaper candidate found", style="dim")
+        if result.no_priceable_candidates:
+            body.append(
+                f"no list price for {_unpriced_candidates_label(result)}",
+                style="dim",
+            )
+            body.append("\n")
+            body.append("  ")
+            body.append(_no_priceable_candidates_note_text(result), style="dim")
+        else:
+            body.append("no cheaper candidate found", style="dim")
         panel = Panel(
             body,
             title="[bold cyan]frugon · cost analysis[/bold cyan]",
@@ -2308,7 +2342,7 @@ def _render_wholesale_panel(result: AnalysisResult) -> None:
     # every figure in the panel reconciles to the full dataset.  Guard the
     # zero-total edge so a degenerate fixture cannot divide by zero.
     total_pct = (saved / current * Decimal("100")) if current else Decimal("0")
-    pct = f"{float(total_pct):.1f}%"
+    pct = f"{_display_pct(total_pct):.1f}%"
     body.append("SAVING".ljust(_PANEL_LABEL_WIDTH), style=f"bold {SAVING_GREEN}")
     body.append(f"{_fmt_usd(saved)}{suffix}", style=f"bold {SAVING_GREEN}")
     body.append("    ·    ", style="dim")
@@ -2409,7 +2443,10 @@ def _render_wholesale_verbose(result: AnalysisResult) -> None:
     Wholesale IS the upper bound (every call swapped), so there is no "Upper
     bound" note here — instead a pointer BACK to the conservative split, which
     routes only the easy calls and keeps quality changes small (the default view).
-    The method note (the offline list-price arithmetic) applies and is kept.
+    The method note (the offline list-price arithmetic) applies and is kept.  The
+    automated-routing upsell lives ONLY in the shared footer
+    (:func:`_render_footer_core`), which always follows this block —
+    duplicating it here read as the site CTA twice.
     """
     rprint(Text("  Notes", style="dim"))
 
@@ -2451,14 +2488,6 @@ def _render_wholesale_verbose(result: AnalysisResult) -> None:
             hang=_LABEL_HANG,
             prefix=_label_prefix("Pool"),
         )
-
-    # Automated-routing upsell — same as the split verbose block.
-    automate = Text(
-        "frugon can route every call automatically and hold the savings for you → ",
-        style="dim",
-    )
-    automate.append("https://frugon.rodiun.io", style=BRAND_CYAN)
-    _print_hanging(automate, hang=_LABEL_HANG, prefix=_label_prefix("Automate"))
 
     rprint("")
 
@@ -3078,9 +3107,9 @@ def _promotion_message(promo: _Promotion) -> str:
     """
     return (
         f"{promo.candidate} held quality on your data "
-        f"({promo.held:,}/{promo.scored:,}) — and at {float(promo.cand_pct):.1f}% "
+        f"({promo.held:,}/{promo.scored:,}) — and at {_display_pct(promo.cand_pct):.1f}% "
         f"it saves more than the recommended {promo.headline_model} "
-        f"({float(promo.headline_pct):.1f}%). Now that it's verified, it's the "
+        f"({_display_pct(promo.headline_pct):.1f}%). Now that it's verified, it's the "
         f"better route: re-run with --candidates {promo.candidate} to switch."
     )
 
@@ -4754,8 +4783,8 @@ def _md_upper_bound_lines(result: AnalysisResult) -> list[str]:
     split_total_pct = _split_report_figures(result, result.split).total_pct
     return [
         f"_Upper bound: moving every call to `{result.candidate_model}` saves "
-        f"~{float(upper):.1f}% — the aggressive end; the "
-        f"~{float(split_total_pct):.1f}% split above is the conservative, "
+        f"~{_display_pct(upper):.1f}% — the aggressive end; the "
+        f"~{_display_pct(split_total_pct):.1f}% split above is the conservative, "
         "quality-respecting recommendation (a full swap is a larger quality change)._"
     ]
 
@@ -4958,6 +4987,39 @@ def _dominant_model(result: AnalysisResult) -> str | None:
     if not result.cost_by_model:
         return None
     return max(result.cost_by_model, key=lambda m: result.cost_by_model[m])
+
+
+def _unpriced_candidates_label(result: AnalysisResult) -> str:
+    """Comma-joined ``--candidates`` names with no known list price, for state (b).
+
+    Falls back to a generic phrase if the list is somehow empty (defensive;
+    ``no_priceable_candidates`` is only ever True alongside a non-empty
+    ``unpriced_candidate_names``).
+    """
+    names = result.unpriced_candidate_names
+    if not names:  # pragma: no cover — defensive; see docstring
+        return "the candidate pool"
+    return ", ".join(names)
+
+
+def _no_priceable_candidates_note_text(
+    result: AnalysisResult, measure_result: MeasureResult | None = None
+) -> str:
+    """State-(b) note text, with the quality-comparison clause appended ONLY
+    when a quality comparison actually renders below it in the SAME report.
+
+    Two independent ways a quality comparison can appear: ``measure_result``
+    is not ``None`` (a ``--measure`` / ``--judge`` run produced a Tier-0 or
+    Tier-1 quality section), or the offline "Candidates considered" table
+    renders its Quality tier column (``len(candidate_projections) > 1`` --
+    no measure run needed).  Neither holds for the single-candidate, no-
+    ``--measure`` case (e.g. ``--candidates ollama/llama3.2:1b``), where the
+    old unconditional clause pointed at a comparison that was never rendered
+    (the live bug this fixes).
+    """
+    if measure_result is not None or len(result.candidate_projections) > 1:
+        return f"{NO_PRICEABLE_CANDIDATES_NOTE} {NO_PRICEABLE_CANDIDATES_QUALITY_CLAUSE}"
+    return NO_PRICEABLE_CANDIDATES_NOTE
 
 
 def _projection_label(result: AnalysisResult) -> str:
@@ -5338,7 +5400,7 @@ def _render_markdown_split(
         "",
         f"**Route {split.routed_count:,} of {result.priced_calls:,} analyzed calls "
         f"(`{split.baseline_model}` easy calls) to `{split.candidate_model}` "
-        f"{_tol}— save ~{float(fig.total_pct):.1f}% "
+        f"{_tol}— save ~{_display_pct(fig.total_pct):.1f}% "
         f"({current_val}{unit} → {blended_val}{unit}).**",
         "",
         _md_projection_caveat_line(
@@ -5380,7 +5442,7 @@ def _render_markdown_split(
         f"| **Blended** | **{result.priced_calls:,}** | **100.0%** | — "
         f"| **{_fmt_usd(fig.blended)}** |",
         "",
-        f"**You save {_fmt_usd(fig.saved)}{unit} (−{float(fig.total_pct):.1f}%).**",
+        f"**You save {_fmt_usd(fig.saved)}{unit} (−{_display_pct(fig.total_pct):.1f}%).**",
         "",
     ]
 
@@ -5632,6 +5694,14 @@ def render_markdown(
             _unrated_lines = _md_unrated_family_lines(result, judged_models_from_measure(measure_result))
             if _unrated_lines:
                 lines += [""] + _unrated_lines
+        elif result.no_priceable_candidates:
+            # State (b): the pool never priced, so there is no swap to report —
+            # distinct from state (a) (evaluated, none cheaper), which stays the
+            # existing silent omission above.
+            lines += [
+                f"- **No list price for:** {_unpriced_candidates_label(result)}",
+                f"- {_no_priceable_candidates_note_text(result, measure_result)}",
+            ]
 
         # Candidates considered (multi-candidate transparency) — no-op when
         # the user passed <=1 candidate (block lines is empty, byte-identical).
@@ -5790,6 +5860,14 @@ def render_markdown_v2(
             f"**Cut these calls ~{float(saving_pct):.1f}% — {before} → {after}.**",
             "",
             f"_{_hero_tail}_",
+            "",
+        ]
+    elif result.no_priceable_candidates:
+        # State (b): the pool never priced, so there was no race to lose —
+        # distinct from state (a) below (evaluated, none cheaper).
+        lines += [
+            f"**No list price for {_unpriced_candidates_label(result)}.** "
+            f"{_no_priceable_candidates_note_text(result, measure_result)}",
             "",
         ]
     else:
@@ -6390,8 +6468,8 @@ def _render_html_v1_split_body(
         upper_note = (
             '<p class="projection-note">Upper bound: moving every call to '
             f'<span class="model-name">{esc(result.candidate_model or "")}</span> '
-            f"saves ~{float(upper):.1f}% &mdash; the aggressive end; the "
-            f"~{float(fig.total_pct):.1f}% split shown is the conservative, "
+            f"saves ~{_display_pct(upper):.1f}% &mdash; the aggressive end; the "
+            f"~{_display_pct(fig.total_pct):.1f}% split shown is the conservative, "
             "quality-respecting recommendation (a full swap is a larger quality change).</p>"
         )
 
@@ -6486,7 +6564,7 @@ def _render_html_v1_split_body(
     parts.append(
         '<div class="card">'
         '<div class="eyebrow">Split routing</div>'
-        f'<div class="saving-hero">{float(fig.total_pct):.1f}%</div>'
+        f'<div class="saving-hero">{_display_pct(fig.total_pct):.1f}%</div>'
         f'<div class="saving-sub">estimated blended saving ({projection_label})</div>'
         + saving_sub_money
         + upper_note
@@ -6652,6 +6730,14 @@ def render_html(
             headline = (
                 f'<div class="saving-hero">{_html_escape.escape(saving_str)}</div>'
                 f'<div class="saving-sub">estimated saving ({projection_label})</div>'
+            )
+        elif result.no_priceable_candidates:
+            # State (b): the pool never priced, so there was no race to lose —
+            # distinct from state (a) below (evaluated, none cheaper).
+            headline = (
+                '<div class="saving-sub" style="margin-bottom:.5rem">'
+                f"No list price for {_html_escape.escape(_unpriced_candidates_label(result))}. "
+                f"{_html_escape.escape(_no_priceable_candidates_note_text(result, measure_result))}</div>"
             )
         else:
             headline = (
@@ -7497,7 +7583,7 @@ def _render_html_v2_split_body(
     # over that total, and the routing plan carries the already-on-a-cheaper
     # bucket so the buckets sum to every analyzed call.
     fig = _split_report_figures(result, split)
-    pct_str = f"{float(fig.total_pct):.1f}%"
+    pct_str = f"{_display_pct(fig.total_pct):.1f}%"
     projection_label = esc(_projection_label(result))
 
     # Quality phrase for the hero lede and routed-row badge — three cases:
@@ -7557,8 +7643,8 @@ def _render_html_v2_split_body(
         _upper = (
             '<p class="hero-caveat">Upper bound: moving every call to '
             f'<span class="route-to">{esc(result.candidate_model or "")}</span> '
-            f"saves ~{float(_ub):.1f}% &mdash; the aggressive end; the "
-            f"~{float(fig.total_pct):.1f}% split shown is the conservative, "
+            f"saves ~{_display_pct(_ub):.1f}% &mdash; the aggressive end; the "
+            f"~{_display_pct(fig.total_pct):.1f}% split shown is the conservative, "
             "quality-respecting recommendation.</p>"
         )
 
@@ -7604,7 +7690,7 @@ def _render_html_v2_split_body(
     # amounts ≥ $0.01, the Cost-by-model formatter) and the section spans the full
     # content width so the figures ("$496.72") sit INSIDE the table rather than
     # overrunning a half-rail track.
-    unit_pct = f"{float(fig.total_pct):.1f}%"
+    unit_pct = f"{_display_pct(fig.total_pct):.1f}%"
 
     # Per-bucket share of total analyzed calls.  The SHARE column reclaims the
     # space freed by rebalancing the column widths (the MODEL/STATUS dead band):
@@ -7987,6 +8073,14 @@ def render_html_v2(
             '<p class="hero-caveat">'
             f"<span class='mono' style='color:var(--ink-dim)'>{projection_label}.</span> "
             f"{_ws_estimate_note}</p>"
+        )
+    elif result.no_priceable_candidates:
+        # State (b): the pool never priced, so there was no race to lose —
+        # distinct from state (a) below (evaluated, none cheaper).
+        hero.append(
+            '<p class="no-rec">'
+            f'<span class="accent">No list price for {esc(_unpriced_candidates_label(result))}.</span> '
+            f"{esc(_no_priceable_candidates_note_text(result, measure_result))}</p>"
         )
     else:
         hero.append(
