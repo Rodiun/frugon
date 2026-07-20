@@ -854,6 +854,19 @@ def analyze(
         )
         raise typer.Exit(code=1)
 
+    # Non-fatal noise guard: a judge verdict built on too few samples is
+    # unreliable (the help text already recommends 25-30 for confidence), but
+    # silently changing the --samples default to 25 would surprise scripted
+    # callers and inflate cost without their consent.  So warn, don't block —
+    # one stderr line naming the actual count, printed only when there is a
+    # verdict to be noisy about (--judge).
+    if judge and samples < 20:
+        rprint(
+            f"[yellow]--judge with --samples {samples} can be noisy — "
+            "25-30 samples gives a steadier verdict.[/yellow]",
+            file=sys.stderr,
+        )
+
     # Resolve the two per-surface preview limits ONCE from the display flags
     # (terminal for render_quality_terminal, report for the written report).  With
     # neither flag set these are the historical defaults, so default rendering is
