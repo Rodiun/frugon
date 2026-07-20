@@ -30,11 +30,16 @@ from frugon.cost import AnalysisResult, CandidateProjection
 from frugon.measure import MeasureResult, Tier1Tally
 from frugon.report import (
     _candidate_shown_price,
+    _candidates_use_monthly_basis,
+    _check_error_footnote_text,
     _effective_cost_per_success_text,
     _fmt_usd,
+    _judged_success_summary,
     _quality_section_html,
     _quality_section_md,
+    _quantize_usd_for_display,
     _reconciled_effective_cost_per_success,
+    _split_priced_effective_cost_footnote_text,
     render_quality_terminal,
 )
 from frugon.routing import SplitRouting
@@ -472,3 +477,212 @@ class TestReconciliation:
         )
         text = _effective_cost_per_success_text(tally, result)
         assert text == "$0.02"
+
+    def test_printed_summary_and_effective_cost_use_the_same_success_count(self) -> None:
+        """C1: the Summary cell and the Eff. $/success cell on the SAME row
+        must reconcile -- a READER parsing the printed row and recomputing
+        price / (N/M) must land on the exact rendered effective-cost text.
+        """
+        result, split = _split_result()
+        tally = _tally(candidate=split.candidate_model)  # wins=6 losses=1 ties=3 bf=1
+        mr = _measure_result(split.candidate_model, tally)
+        term = _capture_terminal(mr, result)
+
+        summary_lines = [ln for ln in term.splitlines() if "equivalent or better" in ln]
+        assert len(summary_lines) == 1
+        line = summary_lines[0]
+        assert "1 tie both failed" in line
+
+        match = re.search(r"(\d+)/(\d+) equivalent or better", line)
+        assert match is not None
+        n, m = int(match.group(1)), int(match.group(2))
+
+        dollar_matches = re.findall(r"\$[\d,]+\.\d+", line)
+        assert dollar_matches, "expected an effective-cost figure on the same row"
+        rendered_effective = dollar_matches[-1]
+
+        price, _is_monthly = _candidate_shown_price(result, split.candidate_model)  # type: ignore[misc]
+        expected = _fmt_usd(price / (Decimal(n) / Decimal(m)))
+        assert rendered_effective == expected
+
+
+# ---------------------------------------------------------------------------
+# _judged_success_summary (W2 dependency + C1) -- single-sourced Summary cell
+# ---------------------------------------------------------------------------
+
+
+class TestJudgedSuccessSummary:
+    def test_zero_verdicts_renders_em_dash(self) -> None:
+        tally = Tier1Tally(candidate="x", wins=0, losses=0, ties=0, errors=5)
+        assert _judged_success_summary(tally) == "—"
+
+    def test_no_both_failed_ties_omits_parenthetical(self) -> None:
+        tally = Tier1Tally(candidate="x", wins=6, losses=1, ties=3, both_failed_ties=0)
+        assert _judged_success_summary(tally) == "9/10 equivalent or better"
+
+    def test_one_both_failed_tie_singular_wording(self) -> None:
+        tally = Tier1Tally(candidate="x", wins=6, losses=1, ties=3, both_failed_ties=1)
+        assert (
+            _judged_success_summary(tally)
+            == "8/10 equivalent or better (1 tie both failed)"
+        )
+
+    def test_multiple_both_failed_ties_plural_wording(self) -> None:
+        tally = Tier1Tally(candidate="x", wins=4, losses=1, ties=5, both_failed_ties=2)
+        assert (
+            _judged_success_summary(tally)
+            == "7/10 equivalent or better (2 ties both failed)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# _quantize_usd_for_display (W1) -- single-sourced display-precision ladder
+# ---------------------------------------------------------------------------
+
+
+class TestQuantizeUsdForDisplay:
+    def test_quantize_matches_fmt_usd_across_all_three_tiers(self) -> None:
+        for amount in (Decimal("0.00003"), Decimal("0.005"), Decimal("389.884")):
+            assert _fmt_usd(amount) == "$" + str(_quantize_usd_for_display(amount))
+
+    def test_zero_quantizes_to_two_dp(self) -> None:
+        assert _quantize_usd_for_display(Decimal("0")) == Decimal("0.00")
+
+
+# ---------------------------------------------------------------------------
+# W2 -- a candidate with NO verdicts at all (every comparison errored) must
+# read differently from one with verdicts but zero judged successes
+# ---------------------------------------------------------------------------
+
+
+class TestZeroVerdictCountVsZeroSuccesses:
+    def test_zero_verdict_count_renders_no_verdicts_not_zero_successes(self) -> None:
+        result, split = _split_result()
+        tally = _tally(
+            candidate=split.candidate_model,
+            wins=0,
+            losses=0,
+            ties=0,
+            errors=10,
+            both_failed_ties=0,
+        )
+        text = _effective_cost_per_success_text(tally, result)
+        assert text == "n/a (no verdicts)"
+
+    def test_verdicts_present_but_zero_successes_still_renders_zero_successes(
+        self,
+    ) -> None:
+        result, split = _split_result()
+        tally = _tally(
+            candidate=split.candidate_model,
+            wins=0,
+            losses=5,
+            ties=2,
+            both_failed_ties=2,
+        )
+        text = _effective_cost_per_success_text(tally, result)
+        assert text == "n/a (0 judged successes)"
+
+
+# ---------------------------------------------------------------------------
+# W4 -- check_errors marks the cell and footnotes the run
+# ---------------------------------------------------------------------------
+
+
+class TestCheckErrorMarker:
+    def test_check_errors_appends_trailing_marker(self) -> None:
+        result, split = _split_result()
+        tally = _tally(candidate=split.candidate_model)
+        tally.check_errors = 1
+        text = _effective_cost_per_success_text(tally, result)
+        assert text is not None
+        assert text.endswith("~")
+
+    def test_no_check_errors_omits_marker(self) -> None:
+        result, split = _split_result()
+        tally = _tally(candidate=split.candidate_model)
+        text = _effective_cost_per_success_text(tally, result)
+        assert text is not None
+        assert not text.endswith("~")
+
+    def test_footnote_none_when_no_check_errors(self) -> None:
+        mr = _measure_result("gpt-4o-mini", _tally())
+        assert _check_error_footnote_text(mr) is None
+
+    def test_footnote_present_and_pluralised_when_check_errors_nonzero(self) -> None:
+        tally = _tally()
+        tally.check_errors = 2
+        mr = _measure_result("gpt-4o-mini", tally)
+        note = _check_error_footnote_text(mr)
+        assert note is not None
+        assert "2 shared-failure checks could not complete" in note
+
+
+# ---------------------------------------------------------------------------
+# W5 -- the split path's Eff. $/success basis is footnoted, not restructured
+# ---------------------------------------------------------------------------
+
+
+class TestSplitPricedFootnote:
+    def test_footnote_fires_for_the_split_routed_candidate(self) -> None:
+        result, split = _split_result()
+        mr = _measure_result(split.candidate_model, _tally(candidate=split.candidate_model))
+        note = _split_priced_effective_cost_footnote_text(mr, result)
+        assert note is not None
+        assert "blended spend" in note
+
+    def test_footnote_absent_without_a_split(self) -> None:
+        result = _wholesale_result()
+        mr = _measure_result("claude-haiku", _tally(candidate="claude-haiku"))
+        assert _split_priced_effective_cost_footnote_text(mr, result) is None
+
+    def test_footnote_absent_when_none_result(self) -> None:
+        mr = _measure_result("gpt-4o-mini", _tally())
+        assert _split_priced_effective_cost_footnote_text(mr, None) is None
+
+
+# ---------------------------------------------------------------------------
+# W6 -- one uniform price basis (monthly XOR observed) across the whole
+# Eff. $/success column, never mixed row-to-row
+# ---------------------------------------------------------------------------
+
+
+class TestUniformPriceBasis:
+    def test_monthly_basis_true_when_any_candidate_is_monthly(self) -> None:
+        result = _multi_candidate_result()
+        result.candidate_projections.append(
+            CandidateProjection(
+                model="mistral-small", status="considered", monthly_cost=Decimal("9.00")
+            )
+        )
+        mr = _measure_result(
+            "mistral-small", _tally(candidate="mistral-small", wins=10, losses=0, ties=0)
+        )
+        assert _candidates_use_monthly_basis(mr, result) is True
+
+    def test_monthly_basis_false_when_no_candidate_is_monthly(self) -> None:
+        result = _multi_candidate_result()
+        mr = _measure_result(
+            "gpt-4o-mini", _tally(candidate="gpt-4o-mini", wins=10, losses=0, ties=0)
+        )
+        assert _candidates_use_monthly_basis(mr, result) is False
+
+    def test_observed_only_row_never_shows_per_month_suffix_when_table_prefers_monthly(
+        self,
+    ) -> None:
+        """A row whose own projection has no monthly figure must still show
+        its (unlabelled) observed figure, never a fabricated /mo suffix, even
+        when the table's dominant basis is monthly.
+        """
+        result = _multi_candidate_result()
+        result.candidate_projections.append(
+            CandidateProjection(
+                model="mistral-small", status="considered", monthly_cost=Decimal("9.00")
+            )
+        )
+        observed_only_tally = _tally(candidate="gpt-4o-mini", wins=10, losses=0, ties=0)
+        text = _effective_cost_per_success_text(
+            observed_only_tally, result, prefer_monthly=True
+        )
+        assert text is not None
+        assert "/mo" not in text

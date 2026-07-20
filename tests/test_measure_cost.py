@@ -404,10 +404,14 @@ def test_run_measure_captures_sampling_and_judge_usage(
     )
     # 3 prompts × (1 baseline + 1 candidate) sampling = 6 ; 3 prompts × 1 judge = 3.
     # Every judge call ties ("VERDICT: TIE" from the mock), so the pointwise
-    # "both failed" check also fires for every prompt: 1 baseline check
-    # (cached per prompt) + 1 candidate check = 2, × 3 prompts = 6.
-    # 6 + 3 + 6 = 15.
-    assert len(result.measure_calls) == 15
+    # "both failed" check fires for every prompt. The mock's content never
+    # parses as "ADDRESSED: ..." so the baseline check ambiguous-defaults to
+    # True (addressed) -- the candidate check is then skipped entirely (W3:
+    # a baseline that already addressed the prompt makes "both failed"
+    # impossible regardless of the candidate). 1 baseline check per prompt,
+    # × 3 prompts = 3.
+    # 6 + 3 + 3 = 12.
+    assert len(result.measure_calls) == 12
     # Every captured call carries the stubbed usage (7 in / 3 out).
     assert all(c.prompt_tokens == 7 and c.completion_tokens == 3 for c in result.measure_calls)
 

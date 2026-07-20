@@ -385,6 +385,86 @@ def test_run_measure_pointwise_usage_merged_into_measure_calls() -> None:
     )
 
 
+def test_run_measure_skips_candidate_check_when_baseline_addressed() -> None:
+    """W3: once the baseline's pointwise check finds it DID address the
+    prompt, 'both failed' is impossible regardless of the candidate -- the
+    candidate-side _judge_addressed call must be skipped entirely (the check
+    burns roughly half the calls it needs otherwise, in a COST tool).
+    """
+    records = [_make_record()]
+    mock_litellm = _make_litellm_mock("model output")
+
+    addressed_calls: list[str] = []
+
+    def _stub_addressed(_litellm: object, _judge_model: str, _messages: Any, output_content: str, **_kwargs: object) -> bool:
+        addressed_calls.append(output_content)
+        return True  # baseline addressed the prompt
+
+    def _stub_call_model(_litellm: object, model: str, _messages: Any, *, is_baseline: bool = False) -> SampledOutput:
+        content = "baseline output" if is_baseline else "candidate output"
+        return SampledOutput(model=model, content=content)
+
+    with (
+        patch("frugon.measure._import_litellm", return_value=mock_litellm),
+        patch("frugon.measure._call_model", side_effect=_stub_call_model),
+        patch("frugon.measure._judge_pair", return_value="tie"),
+        patch("frugon.measure._judge_addressed", side_effect=_stub_addressed),
+    ):
+        result = run_measure(
+            records,
+            "gpt-4o",
+            ["gpt-4o-mini"],
+            n_samples=1,
+            use_judge=True,
+            judge_model="gpt-4o",
+            concurrency=1,
+            seed=0,
+        )
+
+    assert result.comparisons[0].both_failed == [False]
+    # Only the baseline check ran -- the candidate check was skipped entirely.
+    assert addressed_calls == ["baseline output"]
+
+
+def test_run_measure_check_errors_counts_retry_exhausted_pointwise_check() -> None:
+    """W4: when the pointwise both-failed check exhausts its retries on a
+    transient fault, the fault must not vanish silently -- Fail-Loud requires
+    it to surface as Tier1Tally.check_errors so a judge-side outage cannot
+    masquerade as a perfectly clean run.
+    """
+    records = [_make_record()]
+
+    def _stub_call_model(_litellm: object, model: str, _messages: Any, *, is_baseline: bool = False) -> SampledOutput:
+        content = "baseline output" if is_baseline else "candidate output"
+        return SampledOutput(model=model, content=content)
+
+    faulting_litellm = MagicMock()
+    faulting_litellm.completion.side_effect = RuntimeError("network error")
+
+    with (
+        patch("frugon.measure._import_litellm", return_value=faulting_litellm),
+        patch("frugon.measure._call_model", side_effect=_stub_call_model),
+        patch("frugon.measure._judge_pair", return_value="tie"),
+    ):
+        result = run_measure(
+            records,
+            "gpt-4o",
+            ["gpt-4o-mini"],
+            n_samples=1,
+            use_judge=True,
+            judge_model="gpt-4o",
+            concurrency=1,
+            seed=0,
+        )
+
+    assert result.tier1_tallies is not None
+    tally = result.tier1_tallies[0]
+    assert tally.check_errors == 1
+    # The fault-defaulted "addressed" still counts as NOT both-failed --
+    # the ambiguous-parse/fault default is honest and conservative, unchanged.
+    assert tally.both_failed_ties == 0
+
+
 # ---------------------------------------------------------------------------
 # max_check_call_count (unit) + estimate_measure_cost wiring
 # ---------------------------------------------------------------------------

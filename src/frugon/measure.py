@@ -258,6 +258,13 @@ class Tier1Tally:
     prompt, not a genuine equally-good result.  It is a strict subset of
     ``ties`` (``both_failed_ties <= ties`` always), tallied from the same
     verdict pass so it never drifts from the printed Win/Loss/Tie/Error counts.
+
+    ``check_errors`` counts ties whose pointwise both-failed check hit a
+    transient fault and exhausted its retries (:func:`_judge_addressed`
+    defaults such a fault to "addressed" so it never falsely flags a shared
+    failure) — a non-zero count means the judged-success rate for this
+    candidate may be optimistic, since one or more shared failures could have
+    gone undetected.
     """
 
     candidate: str
@@ -266,6 +273,7 @@ class Tier1Tally:
     ties: int = 0
     errors: int = 0
     both_failed_ties: int = 0
+    check_errors: int = 0
 
     @property
     def total(self) -> int:
@@ -1474,6 +1482,7 @@ def _judge_addressed(
     max_retries: int = _JUDGE_MAX_RETRIES,
     backoff_s: float = _JUDGE_RETRY_BACKOFF_S,
     usage_sink: list[MeasureCallUsage] | None = None,
+    fault_sink: list[bool] | None = None,
 ) -> bool:
     """Ask *judge_model* whether *output_content* attempts to address the prompt.
 
@@ -1488,6 +1497,13 @@ def _judge_addressed(
     call that RETURNED — mirroring :func:`_judge_pair`'s cost-disclosure
     contract exactly, so a pointwise check's cost is never silently dropped
     from the run's reported spend.
+
+    *fault_sink*, when provided, gets ``True`` appended ONLY when retries were
+    exhausted by a transient fault — never on the honest ambiguous-parse
+    default. A silent fault-default could mask a real shared failure as
+    "addressed", inflating the judged-success rate with no signal to the
+    reader; callers use this to flag :attr:`Tier1Tally.check_errors` so that
+    silence is fail-loud instead.
     """
     prompt_text = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
     judge_messages = [
@@ -1509,6 +1525,8 @@ def _judge_addressed(
                 if backoff_s > 0:
                     time.sleep(backoff_s)
                 continue
+            if fault_sink is not None:
+                fault_sink.append(True)
             return True  # exhausted retries: honest default, never flag on a fault
         if usage_sink is not None:
             pt, ct = _extract_usage(response)
@@ -1671,6 +1689,11 @@ def run_measure(
     # pointwise check found neither side addressed the prompt (see the module
     # comment above _judge_addressed).  Stays False for every other verdict.
     both_failed_by_prompt: list[list[bool]] = [[] for _ in range(n_prompts)]
+    # Parallel to both_failed_by_prompt; set True ONLY for a "tie" whose
+    # pointwise both-failed determination relied on a _judge_addressed call
+    # that exhausted its retries (fault-defaulted to "addressed" rather than
+    # a genuine parsed answer) -- see Tier1Tally.check_errors.
+    check_fault_by_prompt: list[list[bool]] = [[] for _ in range(n_prompts)]
 
     # Pre-draw the full A/B layout BEFORE any task runs, from a seeded RNG that is
     # independent of (but derived from) the sampling seed.  Drawing it up front in
@@ -1688,6 +1711,8 @@ def run_measure(
             row.extend([""] * n_candidates)
         for bf_row in both_failed_by_prompt:
             bf_row.extend([False] * n_candidates)
+        for cf_row in check_fault_by_prompt:
+            cf_row.extend([False] * n_candidates)
 
     # Progress callbacks fire as each prompt finishes its sampling / judging.  A
     # lock makes the fire atomic; the reported counter is taken under the lock so
@@ -1757,6 +1782,7 @@ def run_measure(
         # pointwise check, not one per tie.  None means "not yet computed" —
         # distinct from a real False/True result.
         baseline_addressed: bool | None = None
+        baseline_check_fault = False
         for c_idx in range(n_candidates):
             cand_out = candidate_outs_by_prompt[p_idx][c_idx]
             assert cand_out is not None  # every candidate resolved before submit
@@ -1779,23 +1805,40 @@ def run_measure(
             # above _judge_addressed).
             if verdict == "tie":
                 if baseline_addressed is None:
+                    baseline_fault_sink: list[bool] = []
                     baseline_addressed = _judge_addressed(
                         litellm_mod,
                         judge_model,
                         sampled[p_idx].messages,
                         cur_out.content,
                         usage_sink=local_usage,
+                        fault_sink=baseline_fault_sink,
                     )
-                candidate_addressed = _judge_addressed(
-                    litellm_mod,
-                    judge_model,
-                    sampled[p_idx].messages,
-                    cand_out.content,
-                    usage_sink=local_usage,
-                )
-                both_failed_by_prompt[p_idx][c_idx] = (
-                    not baseline_addressed and not candidate_addressed
-                )
+                    baseline_check_fault = bool(baseline_fault_sink)
+                if baseline_addressed:
+                    # The baseline already addressed the prompt, so "both
+                    # failed" is impossible regardless of the candidate --
+                    # skip the candidate check entirely (halves the
+                    # pointwise-check calls whenever the baseline holds up).
+                    both_failed_by_prompt[p_idx][c_idx] = False
+                    if baseline_check_fault:
+                        # The baseline's "addressed" came from a fault
+                        # default, not a genuine parsed answer -- the skip
+                        # above may be masking a real shared failure.
+                        check_fault_by_prompt[p_idx][c_idx] = True
+                else:
+                    candidate_fault_sink: list[bool] = []
+                    candidate_addressed = _judge_addressed(
+                        litellm_mod,
+                        judge_model,
+                        sampled[p_idx].messages,
+                        cand_out.content,
+                        usage_sink=local_usage,
+                        fault_sink=candidate_fault_sink,
+                    )
+                    both_failed_by_prompt[p_idx][c_idx] = not candidate_addressed
+                    if candidate_fault_sink:
+                        check_fault_by_prompt[p_idx][c_idx] = True
         if local_usage:
             with _cb_lock:
                 judge_usage.extend(local_usage)
@@ -1865,6 +1908,7 @@ def run_measure(
         ]
         verdicts = verdicts_by_prompt[p_idx] if use_judge else []
         both_failed = both_failed_by_prompt[p_idx] if use_judge else []
+        check_fault = check_fault_by_prompt[p_idx] if use_judge else []
         if use_judge:
             for c_idx, cand in enumerate(candidates):
                 verdict = verdicts[c_idx]
@@ -1877,6 +1921,8 @@ def run_measure(
                     tally.ties += 1
                     if both_failed[c_idx]:
                         tally.both_failed_ties += 1
+                    if check_fault[c_idx]:
+                        tally.check_errors += 1
                 else:
                     tally.errors += 1
         comparisons.append(

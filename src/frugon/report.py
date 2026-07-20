@@ -656,11 +656,12 @@ FUNNEL_LINE = (
 # ---------------------------------------------------------------------------
 
 
-def _fmt_usd(amount: Decimal) -> str:
-    """Format a USD amount with adaptive decimal precision and ROUND_HALF_UP.
+def _quantize_usd_for_display(amount: Decimal) -> Decimal:
+    """Quantize *amount* to its adaptive display precision, ROUND_HALF_UP.
 
-    Three tiers, ascending precision, so a real non-zero cost never prints as
-    $0.00 at standard precision when it is genuinely sub-cent:
+    The single source for the three-tier ladder, so every quantizer that must
+    reconcile with what :func:`_fmt_usd` prints (e.g. the effective-$/success
+    division) shares one implementation and cannot silently drift from it:
 
     * amounts < $0.0001  → 6 dp  (e.g. $0.000030)
     * amounts < $0.01    → 4 dp  (e.g. $0.0050)
@@ -671,10 +672,20 @@ def _fmt_usd(amount: Decimal) -> str:
     _FOUR = Decimal("0.0001")
     _SIX = Decimal("0.000001")
     if Decimal("0") < amount < _FOUR:
-        return "$" + str(amount.quantize(_SIX, rounding=ROUND_HALF_UP))
+        return amount.quantize(_SIX, rounding=ROUND_HALF_UP)
     if Decimal("0") < amount < _TWO:
-        return "$" + str(amount.quantize(_FOUR, rounding=ROUND_HALF_UP))
-    return "$" + str(amount.quantize(_TWO, rounding=ROUND_HALF_UP))
+        return amount.quantize(_FOUR, rounding=ROUND_HALF_UP)
+    return amount.quantize(_TWO, rounding=ROUND_HALF_UP)
+
+
+def _fmt_usd(amount: Decimal) -> str:
+    """Format a USD amount with adaptive decimal precision and ROUND_HALF_UP.
+
+    Three tiers, ascending precision, so a real non-zero cost never prints as
+    $0.00 at standard precision when it is genuinely sub-cent — see
+    :func:`_quantize_usd_for_display` for the ladder.
+    """
+    return "$" + str(_quantize_usd_for_display(amount))
 
 
 # ---------------------------------------------------------------------------
@@ -1402,21 +1413,13 @@ def _reconciled_effective_cost_per_success(
     """
     if success_count <= 0:
         return None
-    _TWO = Decimal("0.01")
-    _FOUR = Decimal("0.0001")
-    _SIX = Decimal("0.000001")
-    if Decimal("0") < price < _FOUR:
-        quantized_price = price.quantize(_SIX, rounding=ROUND_HALF_UP)
-    elif Decimal("0") < price < _TWO:
-        quantized_price = price.quantize(_FOUR, rounding=ROUND_HALF_UP)
-    else:
-        quantized_price = price.quantize(_TWO, rounding=ROUND_HALF_UP)
+    quantized_price = _quantize_usd_for_display(price)
     success_rate = Decimal(success_count) / Decimal(verdict_count)
     return quantized_price / success_rate
 
 
 def _candidate_shown_price(
-    result: AnalysisResult | None, candidate: str
+    result: AnalysisResult | None, candidate: str, *, prefer_monthly: bool = True
 ) -> tuple[Decimal, bool] | None:
     """Return ``(price, is_monthly)`` for the $ figure THIS RUN ALREADY PRINTED for
     *candidate*, or ``None`` when no such figure exists.
@@ -1430,9 +1433,12 @@ def _candidate_shown_price(
          (:func:`_has_split`) — :func:`_split_report_figures`.
       2. The wholesale headline's full-swap New-spend, when *candidate* is the
          analysis engine's own recommended candidate — :func:`_wholesale_current_and_new`.
-      3. The "Candidates considered" block's own per-candidate projection
-         (monthly, else observed) — the multi-candidate explicit ``--candidates``
-         path.
+      3. The "Candidates considered" block's own per-candidate projection —
+         the multi-candidate explicit ``--candidates`` path. *prefer_monthly*
+         picks which of that candidate's two figures (monthly / observed) is
+         tried FIRST; the other is only a fallback for a candidate that lacks
+         the preferred one (see :func:`_candidates_use_monthly_basis` — this
+         column must show one uniform basis across every row, W6).
 
     Returns ``None`` when none of the above has a price for *candidate* (e.g.
     an explicit ``--candidates`` model that is neither the headline nor priced
@@ -1453,15 +1459,61 @@ def _candidate_shown_price(
         return new, projected
     for proj in result.candidate_projections:
         if proj.model == candidate:
-            if proj.monthly_cost is not None:
-                return proj.monthly_cost, True
-            if proj.observed_cost is not None:
-                return proj.observed_cost, False
+            first, second = (
+                (proj.monthly_cost, proj.observed_cost)
+                if prefer_monthly
+                else (proj.observed_cost, proj.monthly_cost)
+            )
+            if first is not None:
+                return first, prefer_monthly
+            if second is not None:
+                return second, not prefer_monthly
     return None
 
 
+def _candidates_use_monthly_basis(
+    measure_result: MeasureResult, result: AnalysisResult | None
+) -> bool:
+    """Return whether the "Eff. $/success" column should prefer the monthly basis.
+
+    W6: the column exists to make candidates directly comparable, so mixing a
+    monthly figure on one row with an observed figure on another (both drawn
+    from :func:`_candidate_shown_price`'s per-candidate fallback) would
+    compare apples to oranges. True when ANY tallied candidate's default
+    resolution is monthly; callers then pass this back into every row's
+    :func:`_candidate_shown_price` call as *prefer_monthly* so the whole
+    column is decided ONCE, not row by row.
+    """
+    if result is None or not measure_result.tier1_tallies:
+        return False
+    for tally in measure_result.tier1_tallies:
+        priced = _candidate_shown_price(result, tally.candidate)
+        if priced is not None and priced[1]:
+            return True
+    return False
+
+
+def _judged_success_summary(tally: Tier1Tally) -> str:
+    """Return the shared "Summary" cell text for *tally*.
+
+    Reads the SAME ``Tier1Tally.judged_success_count`` / ``.verdict_count``
+    that :func:`_effective_cost_per_success_text` divides by, so the Summary
+    cell and the Eff. $/success cell on the same row can never disagree (the
+    RECONCILING INVARIANT). When *tally.both_failed_ties* is non-zero the
+    subtrahend is named inline (e.g. "(1 tie both failed)") so the division
+    is recomputable from the printed row alone.
+    """
+    if tally.verdict_count == 0:
+        return "—"
+    summary = f"{tally.judged_success_count}/{tally.verdict_count} equivalent or better"
+    if tally.both_failed_ties > 0:
+        tie_word = "tie" if tally.both_failed_ties == 1 else "ties"
+        summary += f" ({tally.both_failed_ties} {tie_word} both failed)"
+    return summary
+
+
 def _effective_cost_per_success_text(
-    tally: Tier1Tally, result: AnalysisResult | None
+    tally: Tier1Tally, result: AnalysisResult | None, *, prefer_monthly: bool = True
 ) -> str | None:
     """Return the shared "Eff. $/success" cell text for *tally*, or ``None``.
 
@@ -1470,15 +1522,23 @@ def _effective_cost_per_success_text(
     :class:`MeasureResult` with no cost context), so a run rendered without an
     :class:`AnalysisResult` stays byte-identical to before this metric existed.
     With a real *result*, every tally gets a cell: the effective $ figure,
-    "n/a (0 judged successes)" when the candidate has no judged success, or
-    "n/a (unpriced)" when this run's cost analysis has no $ figure at all for
-    the candidate.
+    "n/a (no verdicts)" when every comparison errored (verdict_count == 0),
+    "n/a (0 judged successes)" when the candidate has verdicts but no judged
+    success, or "n/a (unpriced)" when this run's cost analysis has no $ figure
+    at all for the candidate.
+
+    *prefer_monthly* is the table-wide basis decided once by
+    :func:`_candidates_use_monthly_basis` (W6) — passed straight through to
+    :func:`_candidate_shown_price` so every row in the column resolves
+    against the same preference.
     """
     if result is None:
         return None
-    priced = _candidate_shown_price(result, tally.candidate)
+    priced = _candidate_shown_price(result, tally.candidate, prefer_monthly=prefer_monthly)
     if priced is None:
         return "n/a (unpriced)"
+    if tally.verdict_count <= 0:
+        return "n/a (no verdicts)"
     price, is_monthly = priced
     effective = _reconciled_effective_cost_per_success(
         price, tally.judged_success_count, tally.verdict_count
@@ -1486,7 +1546,65 @@ def _effective_cost_per_success_text(
     if effective is None:
         return "n/a (0 judged successes)"
     suffix = "/mo" if is_monthly else ""
-    return f"{_fmt_usd(effective)}{suffix}"
+    marker = "~" if tally.check_errors > 0 else ""
+    return f"{_fmt_usd(effective)}{suffix}{marker}"
+
+
+def _check_error_footnote_text(measure_result: MeasureResult) -> str | None:
+    """Return the shared "shared-failure check" footnote, or ``None``.
+
+    Fires when any :class:`Tier1Tally` accumulated a non-zero
+    ``check_errors`` -- a pointwise both-failed check that hit a transient
+    fault and exhausted its retries, fault-defaulting to "addressed" rather
+    than a genuine parsed answer (see
+    :func:`frugon.measure._judge_addressed`). A silent fault-default could
+    mask a real shared failure, inflating the judged-success rate with no
+    signal to the reader; this is that signal, single-sourced so the
+    terminal/Markdown/HTML surfaces read the identical sentence and match the
+    trailing ``~`` on the affected "Eff. $/success" cells.
+    """
+    if not measure_result.tier1_tallies:
+        return None
+    total = sum(t.check_errors for t in measure_result.tier1_tallies)
+    if total <= 0:
+        return None
+    noun = "check" if total == 1 else "checks"
+    return (
+        f"~ {total} shared-failure {noun} could not complete; the success "
+        "rate may be optimistic"
+    )
+
+
+def _split_priced_effective_cost_footnote_text(
+    measure_result: MeasureResult, result: AnalysisResult | None
+) -> str | None:
+    """Return the split-path "Eff. $/success" basis footnote, or ``None``.
+
+    :func:`_candidate_shown_price` prices the split's routing candidate off
+    the BLENDED "New" spend — which includes traffic still routed to the
+    baseline — and :func:`_effective_cost_per_success_text` then divides that
+    blended figure by the CANDIDATE-only judged-success rate, over-attributing
+    candidate failures to baseline traffic that never reached the candidate.
+    The printed figure stays the same reconciling "New" number shown
+    elsewhere on the report (restructuring the split math is out of scope
+    here); this footnote names the basis instead, so a reader is not misled
+    into reading the effective figure as the candidate's own spend alone.
+
+    Fires only when *result* has a split headline AND the split's routing
+    candidate is one of the tallies actually shown in this table.
+    """
+    if result is None or not _has_split(result) or result.split is None:
+        return None
+    if not measure_result.tier1_tallies:
+        return None
+    candidate = result.split.candidate_model
+    if not any(t.candidate == candidate for t in measure_result.tier1_tallies):
+        return None
+    return (
+        "Eff. $/success for the routed candidate uses blended spend "
+        "(traffic still on the baseline included) at the candidate's judged "
+        "success rate."
+    )
 
 
 def _call_share_pcts(counts: list[int]) -> list[float]:
@@ -3811,14 +3929,10 @@ def render_quality_terminal(
         show_effective_cost = result is not None
         if show_effective_cost:
             judge_table.add_column("Eff. $/success", justify="right", style="dim")
+        use_monthly_basis = _candidates_use_monthly_basis(measure_result, result)
 
         for tally in measure_result.tier1_tallies:
-            non_error = tally.wins + tally.losses + tally.ties
-            summary = (
-                f"{tally.wins + tally.ties}/{non_error} equivalent or better"
-                if non_error > 0
-                else "—"
-            )
+            summary = _judged_success_summary(tally)
             row = [
                 tally.candidate,
                 str(tally.wins),
@@ -3828,9 +3942,22 @@ def render_quality_terminal(
                 summary,
             ]
             if show_effective_cost:
-                row.append(_effective_cost_per_success_text(tally, result) or "")
+                row.append(
+                    _effective_cost_per_success_text(
+                        tally, result, prefer_monthly=use_monthly_basis
+                    )
+                    or ""
+                )
             judge_table.add_row(*row)
         rprint(judge_table)
+        split_price_note = _split_priced_effective_cost_footnote_text(
+            measure_result, result
+        )
+        if split_price_note is not None:
+            rprint(f"[dim]{split_price_note}[/dim]")
+        check_error_note = _check_error_footnote_text(measure_result)
+        if check_error_note is not None:
+            rprint(f"[{CAUTION_AMBER}][dim]{check_error_note}[/dim][/{CAUTION_AMBER}]")
         # Synthesis: tie the tally back to the offline quality estimate.
         _render_tier1_synthesis(measure_result, result=result)
         # Change 2 — promotion: a candidate excluded from the offline route for
@@ -4266,22 +4393,28 @@ def _quality_section_md(
                 "| Candidate | Win | Loss | Tie | Error | Summary |",
                 "|-----------|----:|-----:|----:|------:|--------:|",
             ]
+        use_monthly_basis = _candidates_use_monthly_basis(measure_result, result)
         for tally in measure_result.tier1_tallies:
-            non_error = tally.wins + tally.losses + tally.ties
-            summary = (
-                f"{tally.wins + tally.ties}/{non_error} equivalent or better"
-                if non_error > 0
-                else "—"
-            )
+            summary = _judged_success_summary(tally)
             row = (
                 f"| `{tally.candidate}` | {tally.wins:,} | {tally.losses:,} "
                 f"| {tally.ties:,} | {tally.errors:,} | {summary} |"
             )
             if show_effective_cost:
-                eff_text = _effective_cost_per_success_text(tally, result)
+                eff_text = _effective_cost_per_success_text(
+                    tally, result, prefer_monthly=use_monthly_basis
+                )
                 row += f" {eff_text} |"
             lines.append(row)
         lines.append("")
+        split_price_note = _split_priced_effective_cost_footnote_text(
+            measure_result, result
+        )
+        if split_price_note is not None:
+            lines += [f"_{split_price_note}_", ""]
+        check_error_note = _check_error_footnote_text(measure_result)
+        if check_error_note is not None:
+            lines += [f"> {check_error_note}", ""]
         # Verdict synthesis — the SAME sentence the terminal renders, so the
         # report and the terminal never disagree.  Caution states carry a ⚠.
         # On a NOT-confirmed verdict, if a cheaper higher-tier model exists the
@@ -4557,17 +4690,18 @@ def _quality_section_html(
         # AnalysisResult is in hand to price it — see the terminal renderer's
         # matching gate for why it's an all-or-nothing column.
         show_effective_cost = result is not None
+        use_monthly_basis = _candidates_use_monthly_basis(measure_result, result)
         rows = ""
         for tally in measure_result.tier1_tallies:
-            non_error = tally.wins + tally.losses + tally.ties
-            summary = (
-                f"{tally.wins + tally.ties}/{non_error} equivalent or better"
-                if non_error > 0
-                else "—"
-            )
+            summary = _judged_success_summary(tally)
             eff_cell = ""
             if show_effective_cost:
-                eff_text = esc(_effective_cost_per_success_text(tally, result) or "")
+                eff_text = esc(
+                    _effective_cost_per_success_text(
+                        tally, result, prefer_monthly=use_monthly_basis
+                    )
+                    or ""
+                )
                 eff_cell = f'<td class="summary">{eff_text}</td>'
             rows += (
                 "<tr>"
@@ -4587,6 +4721,18 @@ def _quality_section_html(
             f"<th>Error</th><th>Summary</th>{eff_header}"
             f"</tr></thead><tbody>{rows}</tbody></table>"
         )
+        split_price_note = _split_priced_effective_cost_footnote_text(
+            measure_result, result
+        )
+        if split_price_note is not None:
+            parts.append(
+                f'<p class="quality-split-price-note">{esc(split_price_note)}</p>'
+            )
+        check_error_note = _check_error_footnote_text(measure_result)
+        if check_error_note is not None:
+            parts.append(
+                f'<p class="quality-check-error">{esc(check_error_note)}</p>'
+            )
         # Verdict synthesis — verbatim from the shared classifier.  A
         # NOT-confirmed verdict escalates to the next rung up (cyan model name +
         # command) when a cheaper higher-tier model exists, matching the terminal
