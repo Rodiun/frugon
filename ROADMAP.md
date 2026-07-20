@@ -2,7 +2,7 @@
 
 ## Changelog
 
-### Unreleased
+### v0.2.6
 
 - **A tie now gets checked for a shared failure.** The pairwise judge defaults
   to a tie whenever neither answer is clearly better, but that alone can't
@@ -18,6 +18,8 @@
 - **`--judge` now warns below 20 samples.** A judge verdict built on a
   handful of prompts is noisy; frugon now prints a heads-up recommending
   25-30 samples for a steadier read, rather than staying silent about it.
+### v0.2.5
+
 - **`--judge` and `--judge-model` now fail fast when their prerequisite is
   missing.** Passing `--judge` without `--measure`, or `--judge-model`
   without `--judge`, used to run the analysis and silently ignore the flag.
@@ -38,6 +40,73 @@
   race never ran. frugon now says plainly when a candidate pool has no list
   price to race against, while still showing the full quality comparison when
   you ran `--measure`.
+
+### v0.2.4
+
+- **Compressed logs cannot exhaust your machine.** `.gz` input is decompressed
+  as a stream under a 512MB ceiling (`FRUGON_MAX_GZIP_BYTES` to override), and a
+  truncated or mislabeled archive gets a clean one-line error, not a traceback.
+- **A malformed log line no longer ends the run.** JSON that parses but is not a
+  record (a bare array, string, or number) counts into the "malformed records
+  skipped" total you already see, and the analysis carries on.
+- **Report writes are atomic and symlink-safe.** Every report is written to a
+  temp file and swapped into place, so a crash cannot leave half a report and a
+  symlinked output path cannot overwrite the symlink's target.
+- **`capture` treats your log like the credential it is.** The capture file is
+  created private (`0o600`) on macOS and Linux, and the startup panel carries an
+  explicit caution on every platform: it holds your full prompts and completions.
+- **The capture proxy fails loud.** Streaming requests get a clear 400 rather
+  than a silently broken stream, unsupported paths log a one-time warning naming
+  the path, and a stop signal shuts the proxy down through its normal cleanup.
+- **Deterministic sampling dedup.** `--measure`'s dedup key uses sha256 instead
+  of Python's process-salted `hash()`, so the same logs dedup identically across
+  runs and machines.
+
+### v0.2.3
+
+- **The "Compared" checkpoint shows its own elapsed time**, and the progress bar
+  names the comparison stage while it runs, so ranking a couple dozen candidates
+  no longer looks like a stall.
+- **`--demo --measure` says upfront why it only needs an OpenAI key.** The demo's
+  recommendation runs against the full roster like any other run; only its
+  measure try-out samples a single pinned model. That is now disclosed where it
+  happens rather than in the fine print.
+- **The bare `mistral-*` family routes correctly for `--measure`.** LiteLLM does
+  not infer a provider from a bare Mistral name; frugon now routes it explicitly
+  instead of failing with a generic bad-request.
+
+### v0.2.2
+
+- **Analysis is dramatically faster.** Pricing checked the pricing file on disk
+  once per record, and the candidates block re-ran easy/hard classification once
+  per candidate though it never depends on the candidate. Both now run once per
+  run. On the bundled demo the analysis pass dropped from roughly 17 seconds to
+  about 1. Figures are unchanged to the cent.
+- **The demo image renders on PyPI.** The README's GIF used a relative path that
+  GitHub resolves and PyPI does not; it now points at the raw URL.
+- **A clearer "Candidates considered" legend.** Pool size and rows shown sit in
+  the header, and the prose below is three short bullets.
+
+### v0.2.1
+
+- **A 23-model recommendation roster across 11 vendors**, every one priced and
+  quality-rated, so recommendations draw from a much wider and more current
+  field. The two open-source Llama 4 checkpoints, which have no single
+  first-party price, are priced via a labeled reference host rather than an
+  invented number.
+- **See what else was considered.** A default run now shows a "Candidates
+  considered" block alongside the headline: the recommended model plus the next
+  four cheapest that also beat your current spend, each with its own projected
+  cost, saving, and quality tier. Ties on saving go to the higher quality tier,
+  and the column makes that call visible rather than asserted.
+- **Better quality coverage for reasoning models.** A rating published under an
+  effort-tagged or dated name is attributed to the base model, since reasoning
+  effort changes how many tokens a call spends thinking, not the per-token rate.
+  Pricing is never folded this way.
+- **The demo is no longer special-cased.** `--demo` uses the same default roster
+  a real run does, so it shows what you would actually get.
+- **`--measure` and `--judge` recognise every vendor in the roster**, so each
+  model gets the correct provider key prompt and routes to its provider.
 
 ### v0.2.0
 
