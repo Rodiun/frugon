@@ -2058,8 +2058,18 @@ _ESTIMATE_CALL_THRESHOLD = 30
 # Estimated tokens a single judge REPLY costs — the judge is instructed to answer
 # with one short "VERDICT: A|B|TIE" line, so its completion is a handful of
 # tokens regardless of input size.  A small fixed constant keeps the estimate
-# honest without pretending to know the exact reply length in advance.
+# honest without pretending to know the exact reply length in advance.  The
+# pointwise "both failed" check's reply ("ADDRESSED: YES|NO") is the same
+# shape — one short line — so this constant is reused for it too.
 _JUDGE_REPLY_TOKENS_EST = 8
+
+# Fixed token overhead of ADDRESS_PROMPT_TEMPLATE's own wording — everything in
+# the template EXCEPT the interpolated {prompt} and {output}, which are already
+# priced from the record's own token counts.  ~479 characters of fixed
+# instruction text, rounded up from a 4-chars/token estimate (~120) to a round
+# number that stays a genuine upper bound rather than an exact-but-fragile
+# count that drifts the moment the template's wording changes.
+_ADDRESS_TEMPLATE_OVERHEAD_TOKENS_EST = 130
 
 
 @dataclass
@@ -2092,6 +2102,17 @@ class MeasureEstimate:
     whenever ``use_judge`` is False (a TIE, and therefore the pointwise check,
     is impossible without a judge).  Defaults to 0 so existing direct-
     construction callers/tests are unaffected.
+
+    ``max_check_cost`` is the matching WORST-CASE EXTRA dollar cost of those
+    same ``max_check_calls`` calls — priced at the judge model, the same way
+    the exact legs are priced, over the same sampled records.  It is ``None``
+    whenever the ceiling cannot be honestly stated: no judge, no judge model,
+    or the judge model itself unpriced (never fabricate a figure the pricing
+    table cannot support).  When not ``None``, the true worst-case run cost is
+    ``estimated_cost + max_check_cost`` — never displayed as a stand-alone
+    figure, only ever added to ``estimated_cost`` to form the printed ceiling.
+    Defaults to ``None`` so existing direct-construction callers/tests are
+    unaffected.
     """
 
     planned_calls: int
@@ -2101,6 +2122,7 @@ class MeasureEstimate:
     n_candidates: int
     use_judge: bool
     max_check_calls: int = 0
+    max_check_cost: Decimal | None = None
 
 
 def planned_call_count(
@@ -2154,7 +2176,13 @@ def estimate_measure_cost(
         model's per-token price;
       * each judge call is priced with an input of ``prompt_tokens`` plus BOTH
         outputs (baseline + candidate, proxied by the record's completion tokens
-        for each) and a small fixed reply size (the judge answers one line).
+        for each) and a small fixed reply size (the judge answers one line);
+      * each WORST-CASE pointwise "both failed" check call (see
+        :func:`max_check_call_count`) is priced at the judge model too, with an
+        input of ``prompt_tokens`` plus ONE output plus the fixed
+        ``ADDRESS_PROMPT_TEMPLATE`` wording overhead, and the same small fixed
+        reply size — accumulated into ``MeasureEstimate.max_check_cost``, the
+        EXTRA dollars on top of ``estimated_cost`` if every judged pair ties.
 
     The completion-token count of the LOG record is used as the expected output
     size for the candidate models too — a proxy, since the candidate's real reply
@@ -2162,8 +2190,10 @@ def estimate_measure_cost(
     ESTIMATE (the CLI marks it ``~``).  A target model missing from the pricing
     table contributes nothing to the total and is named in ``unpriced_models``;
     when EVERY priced leg is unpriced the estimate's ``estimated_cost`` is
-    ``None`` (the call count is still returned).  Pure local arithmetic — no
-    network, no provider call.
+    ``None`` (the call count is still returned).  ``max_check_cost`` is ``None``
+    whenever the judge model itself is unpriced — the check leg's cost cannot be
+    honestly derived without a priced judge, so the ceiling is omitted rather
+    than understated.  Pure local arithmetic — no network, no provider call.
     """
     from decimal import Decimal
 
@@ -2207,6 +2237,7 @@ def estimate_measure_cost(
         )
 
     total = Decimal("0")
+    max_check_total = Decimal("0")
     for rec in sampled:
         pt = max(0, rec.prompt_tokens)
         ct = max(0, rec.completion_tokens)
@@ -2222,11 +2253,33 @@ def estimate_measure_cost(
             for _cand in candidates:
                 total += _leg_cost(judge_model, judge_in, _JUDGE_REPLY_TOKENS_EST)
 
+            # WORST-CASE pointwise "both failed" check calls (see
+            # max_check_call_count): 1 baseline check (shared/cached across this
+            # prompt's candidates) + 1 check per candidate, the SAME per-prompt
+            # shape max_check_call_count sums over n_prompts — so the priced
+            # call count here reconciles with max_checks exactly.  Each check is
+            # a single-output pointwise call: input ≈ prompt + that output +
+            # the ADDRESS_PROMPT_TEMPLATE's own fixed wording; reply is the
+            # same short fixed line as the pairwise judge.
+            check_in = pt + ct + _ADDRESS_TEMPLATE_OVERHEAD_TOKENS_EST
+            check_call_cost = _leg_cost(judge_model, check_in, _JUDGE_REPLY_TOKENS_EST)
+            max_check_total += check_call_cost * (1 + len(candidates))
+
     # estimated_cost is None only when NOTHING could be priced — then the dollar
     # figure is meaningless and the CLI shows "est. unavailable" while still
     # surfacing the call count.
     all_priced_unknown = all(prices[m] is None for m in prices) if prices else True
     estimated: Decimal | None = None if all_priced_unknown else total
+
+    # max_check_cost is only ever stated when the judge itself is priced — an
+    # unpriced judge means the check leg's dollar figure cannot be honestly
+    # derived, so the ceiling is OMITTED entirely (never understated, never
+    # fabricated) rather than silently excluding just the check leg's cost.
+    judge_priced = (
+        use_judge and judge_model is not None and prices.get(judge_model) is not None
+    )
+    max_check_cost: Decimal | None = max_check_total if judge_priced else None
+
     return MeasureEstimate(
         planned_calls=planned,
         estimated_cost=estimated,
@@ -2235,4 +2288,5 @@ def estimate_measure_cost(
         n_candidates=n_candidates,
         use_judge=use_judge,
         max_check_calls=max_checks,
+        max_check_cost=max_check_cost,
     )

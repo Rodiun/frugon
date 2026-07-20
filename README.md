@@ -207,15 +207,38 @@ an average across the sample can hide a model that degrades badly on a small sli
 of hard inputs. Raise `--samples` to widen coverage, and re-run on a fresh sample
 to see whether the verdict holds.
 
-**A tie can hide a shared failure.** The judge is pairwise. It sees your current
-model's answer and the candidate's answer, anonymised as A and B in a randomised
-order, and it defaults to a tie unless one answer is clearly and materially better.
-That design removes label and position bias, but it also means two answers that
-fail the same way score as a tie: the judge is asked which answer is better, not
-whether either is correct on its own. A tie tells you the candidate is no worse
-than your current model, not that either one is right. When you need the ground
-truth on a prompt, read the sampled outputs yourself; `--measure` prints them side
-by side.
+**A tie gets a second, absolute check.** The judge is pairwise: it sees your
+current model's answer and the candidate's answer, anonymised as A and B in a
+randomised order, and it defaults to a tie unless one answer is clearly and
+materially better. That design removes label and position bias, but a tie alone
+is silent about *why* — it covers both "both answers are equally good" and "both
+answers equally failed to address the prompt", and only the first is a genuine
+judged success. So every tie gets a second, single-answer check: does this
+answer attempt to address the prompt at all? When neither side does, `--judge`
+marks the row `[both failed]` and excludes it from the judged-success count —
+a tie no longer silently counts as a win. The check's default is deliberately
+honest rather than suspicious: an ambiguous reply from the check itself, or a
+transient fault that exhausts its retries, resolves to "addressed" — so the
+`[both failed]` flag under-reports shared failure rather than over-reports it,
+and a `~` next to a candidate's `Eff. $/success` figure (see below) means one or
+more of those checks could not complete, so the true rate may be a little worse
+than shown.
+
+**`Eff. $/success` turns quality and price into one number.** When `--judge`
+runs, each candidate's row divides its price by its judged-success rate — what
+you actually pay per answer that held up, not per call made. A `/mo` suffix
+means the figure is on the monthly-projection basis; otherwise it's the
+observed-sample basis. It reads `n/a` in three honest cases: `n/a (unpriced)`
+when this run has no dollar figure for the candidate at all; `n/a (no
+verdicts)` when every comparison on that candidate errored before a verdict
+was reached; and `n/a (0 judged successes)` when the candidate has verdicts
+but none of them counted as a success (a division by zero is never shown as
+`$0.00` or `$inf` — it's named). For the routed candidate on a split
+recommendation, the price side of the division is the *blended* spend — the
+whole dataset's cost after routing, including the traffic that never left the
+baseline model — divided by that candidate's own judged-success rate; a note
+under the table names this basis so the figure is never mistaken for the
+candidate's isolated cost.
 
 **One draw does not measure variance.** Each sampled prompt is answered once, and
 Frugon sends no temperature setting, so your provider's default applies. A single

@@ -355,7 +355,23 @@ def _render_measure_estimate(estimate: MeasureEstimate) -> None:
     those calls only fire on an actual TIE verdict, which is unknowable before
     the run, so they are named "up to N more" rather than folded into the exact
     ``planned_calls`` total (see :func:`frugon.measure.max_check_call_count`).
+
+    When ``estimate.max_check_cost`` is not ``None`` (the judge model is
+    priced), the cost clause carries a matching dollar CEILING: the base
+    estimate PLUS the worst-case check cost, e.g.::
+
+        Estimated cost ~$0.42 on your keys, up to ~$0.61 if every judged pair
+        ties.
+
+    Both figures are rendered through the SAME shared formatter
+    (:func:`frugon.report._fmt_usd`) that every other dollar figure in the tool
+    uses, so a reader can recompute the ceiling from the two printed figures
+    alone. The ceiling is OMITTED (not shown as "$0.00" or silently folded into
+    the base) whenever the judge model itself could not be priced — never
+    fabricate a figure the pricing table cannot support.
     """
+    from frugon.report import _fmt_usd
+
     n_prompts = estimate.n_prompts
     n_candidates = estimate.n_candidates
     use_judge = estimate.use_judge
@@ -406,7 +422,17 @@ def _render_measure_estimate(estimate: MeasureEstimate) -> None:
         plan_clause = f"{estimate.planned_calls:,} provider calls {sample_paren}"
 
     if estimate.estimated_cost is not None:
-        cost_clause = f"Estimated cost ~${float(estimate.estimated_cost):.2f} on your keys"
+        cost_clause = f"Estimated cost ~{_fmt_usd(estimate.estimated_cost)} on your keys"
+        # A dollar CEILING alongside the base estimate — the same disclosure the
+        # call-count clause already makes ("up to N more" calls), stated in
+        # money.  Only shown when the judge itself is priced (see
+        # MeasureEstimate.max_check_cost); an unpriced judge means this figure
+        # cannot be honestly derived, so it is omitted rather than understated.
+        if estimate.max_check_cost is not None:
+            ceiling = estimate.estimated_cost + estimate.max_check_cost
+            cost_clause += (
+                f", up to ~{_fmt_usd(ceiling)} if every judged pair ties"
+            )
     else:
         # No target model was priceable — be honest: show the call count, not a
         # fabricated dollar figure.

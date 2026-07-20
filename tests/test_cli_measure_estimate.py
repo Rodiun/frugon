@@ -193,7 +193,14 @@ def test_large_run_estimate_names_judge_when_judge_set(
         "up to 40 more to check ties for shared failure. "
         "Estimated cost ~$"
     ) in flat
-    assert "on your keys." in flat
+    # The default judge model (gpt-4.1) is priced against real pricing.json, so
+    # the cost clause carries the matching dollar CEILING: base estimate PLUS
+    # the worst-case pointwise-check cost, stated "up to ~$Y" alongside the
+    # base "~$X" — not asserting exact digits here (that is the job of the
+    # unit-level estimate_measure_cost/render tests), only that both figures
+    # and the reconciling wording are present.
+    assert "on your keys, up to ~$" in flat
+    assert "if every judged pair ties." in flat
     # ESTIMATE-LINE separators are colon/period only — never an em-dash (reads as
     # a minus sign).  Scoped to the estimate line: the report body above it
     # legitimately carries one in its dim "Upper bound … —" note.

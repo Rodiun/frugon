@@ -29,6 +29,7 @@ from frugon.measure import (
     SampledOutput,
     _extract_usage,
     estimate_measure_cost,
+    max_check_call_count,
     measurement_cost,
     planned_call_count,
     run_measure,
@@ -332,6 +333,172 @@ def test_estimate_planned_calls_and_cost(monkeypatch: pytest.MonkeyPatch) -> Non
     # × 4 records = 3.088
     assert est.estimated_cost == Decimal("3.088")
     assert est.unpriced_models == []
+
+
+def test_estimate_max_check_cost_priced_judge_gives_dollar_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§2a Stage-2 gap: the pre-run estimate must price the worst-case
+    pointwise "both failed" check leg in DOLLARS, not just disclose its call
+    count.  A priced judge model means ``max_check_cost`` is a real figure the
+    CLI can add to ``estimated_cost`` to print a true worst-case ceiling."""
+    monkeypatch.setattr("frugon.pricing.get_model_price", _fixed_price)
+    # Same 4-record / 1-candidate / judge-on shape as
+    # test_estimate_planned_calls_and_cost, so estimated_cost is the same
+    # known-good 3.088 and the NEW max_check_cost can be hand-verified
+    # alongside it.
+    records = [_record(pt=200, ct=80) for _ in range(4)]
+    est = estimate_measure_cost(
+        records,
+        current_model="gpt-4o",
+        candidates=["gpt-4o-mini"],
+        n_samples=4,
+        use_judge=True,
+        judge_model="gpt-4o",
+    )
+    assert est.estimated_cost == Decimal("3.088")
+    # Per record, the check leg (judge model gpt-4o, in $0.001/out $0.002):
+    #   check input  ≈ prompt_tokens + completion_tokens + template overhead
+    #                = 200 + 80 + 130 = 410
+    #   check output = 8 (same fixed reply estimate as the pairwise judge)
+    #   one check call = 410×0.001 + 8×0.002 = 0.41 + 0.016 = 0.426
+    #   per prompt: 1 baseline check + 1 candidate check = 2 calls = 0.852
+    # × 4 records = 3.408
+    assert est.max_check_cost == Decimal("3.408")
+    # The EXTRA-dollars framing mirrors max_check_calls (an EXTRA call count,
+    # not the grand total) — so the true worst-case ceiling is the sum.
+    ceiling = est.estimated_cost + est.max_check_cost
+    assert ceiling == Decimal("6.496")
+
+
+def test_estimate_max_check_cost_omitted_when_judge_unpriced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unpriced judge model means the check leg's dollar figure cannot be
+    honestly derived — the ceiling must be OMITTED (None), never fabricated
+    and never silently understated as 0."""
+    monkeypatch.setattr("frugon.pricing.get_model_price", _fixed_price)
+    records = [_record(pt=200, ct=80) for _ in range(4)]
+    est = estimate_measure_cost(
+        records,
+        current_model="gpt-4o",
+        candidates=["gpt-4o-mini"],
+        n_samples=4,
+        use_judge=True,
+        judge_model="totally-unpriced-judge",
+    )
+    # The judge itself is unpriced, so its pairwise leg contributes nothing —
+    # but the sampling legs (gpt-4o, gpt-4o-mini) ARE priced, so the base
+    # estimate is still a real number.  The check leg rides on the SAME
+    # unpriced judge, so its ceiling must be omitted even though the base
+    # estimate is present.
+    assert est.estimated_cost is not None
+    assert est.max_check_calls > 0  # the call-count disclosure still fires
+    assert est.max_check_cost is None  # but the dollar ceiling is honestly omitted
+
+
+def test_estimate_max_check_cost_call_count_reconciles_with_max_check_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dollar ceiling and the call-count disclosure must never drift: the
+    check leg is priced over EXACTLY max_check_calls calls."""
+    monkeypatch.setattr("frugon.pricing.get_model_price", _fixed_price)
+    records = [_record(pt=150, ct=40) for _ in range(6)]
+    est = estimate_measure_cost(
+        records,
+        current_model="gpt-4o",
+        candidates=["gpt-4o-mini"],
+        n_samples=6,
+        use_judge=True,
+        judge_model="gpt-4o",
+    )
+    assert est.max_check_calls == max_check_call_count(
+        est.n_prompts, est.n_candidates, use_judge=est.use_judge
+    )
+    assert est.max_check_calls > 0
+    assert est.max_check_cost is not None
+    # A single check call's cost, derived independently from the same fixed
+    # prices, times the exact call count, must equal max_check_cost — proving
+    # the two figures are priced over the SAME call count, not just similar
+    # ones.
+    per_call = Decimal("0.001") * Decimal(150 + 40 + 130) + Decimal("0.002") * Decimal(8)
+    assert est.max_check_cost == per_call * est.max_check_calls
+
+
+def test_estimate_max_check_cost_ceiling_never_below_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ceiling (base + max_check_cost) must never be LESS than the base
+    estimate — a worst-case figure that understates the best-case estimate
+    would be worse than useless, it would be actively misleading."""
+    monkeypatch.setattr("frugon.pricing.get_model_price", _fixed_price)
+    records = [_record(pt=10, ct=5) for _ in range(3)]
+    est = estimate_measure_cost(
+        records,
+        current_model="gpt-4o",
+        candidates=["gpt-4o-mini", "gpt-4o"],
+        n_samples=3,
+        use_judge=True,
+        judge_model="gpt-4o",
+    )
+    assert est.estimated_cost is not None
+    assert est.max_check_cost is not None
+    assert est.estimated_cost + est.max_check_cost >= est.estimated_cost
+
+
+def test_estimate_max_check_cost_none_when_no_judge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A zero-judge run cannot tie, so it cannot trigger the pointwise check
+    at all — the ceiling stays None, matching max_check_calls staying 0, and
+    the base estimate is completely unaffected by this change."""
+    monkeypatch.setattr("frugon.pricing.get_model_price", _fixed_price)
+    records = [_record(pt=200, ct=80) for _ in range(4)]
+    est = estimate_measure_cost(
+        records,
+        current_model="gpt-4o",
+        candidates=["gpt-4o-mini"],
+        n_samples=4,
+        use_judge=False,
+    )
+    assert est.max_check_calls == 0
+    assert est.max_check_cost is None
+    # Unaffected base math: same per-record baseline+candidate legs as the
+    # judge-on fixture, minus the judge/check legs entirely.
+    #   baseline gpt-4o: 200×0.001 + 80×0.002 = 0.36
+    #   candidate gpt-4o-mini: 200×0.0001 + 80×0.0002 = 0.036
+    #   per record = 0.396 × 4 records = 1.584
+    assert est.estimated_cost == Decimal("1.584")
+
+
+def test_estimate_max_check_cost_zero_candidates_still_reconciles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Zero candidates is an edge case ``max_check_call_count`` already handles
+    (existing, unchanged behaviour — this batch only ADDS a dollar figure
+    alongside it) — the new ``max_check_cost`` must still reconcile with
+    whatever call count that pre-existing formula produces, never drift from
+    it."""
+    monkeypatch.setattr("frugon.pricing.get_model_price", _fixed_price)
+    records = [_record(pt=200, ct=80) for _ in range(4)]
+    est = estimate_measure_cost(
+        records,
+        current_model="gpt-4o",
+        candidates=[],
+        n_samples=4,
+        use_judge=True,
+        judge_model="gpt-4o",
+    )
+    assert est.n_candidates == 0
+    assert est.max_check_calls == max_check_call_count(
+        est.n_prompts, est.n_candidates, use_judge=est.use_judge
+    )
+    if est.max_check_calls > 0:
+        assert est.max_check_cost is not None
+        per_call = Decimal("0.001") * Decimal(200 + 80 + 130) + Decimal("0.002") * Decimal(8)
+        assert est.max_check_cost == per_call * est.max_check_calls
+    else:
+        assert est.max_check_cost is None
 
 
 def test_estimate_unpriced_target_model(monkeypatch: pytest.MonkeyPatch) -> None:

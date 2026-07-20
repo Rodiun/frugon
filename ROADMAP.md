@@ -4,6 +4,20 @@
 
 ### Unreleased
 
+- **A tie now gets checked for a shared failure.** The pairwise judge defaults
+  to a tie whenever neither answer is clearly better, but that alone can't
+  distinguish "both are equally good" from "both equally failed to address the
+  prompt." Every tie now gets a second, single-answer check; when neither side
+  addressed the prompt, `--judge` marks the row `[both failed]` and excludes it
+  from the judged-success count instead of silently counting it as a win.
+- **New `Eff. $/success` column for `--judge` runs.** Each candidate's price
+  divided by its judged-success rate, so quality and cost read as one number —
+  what you actually pay per answer that held up, not per call made. Reads
+  `n/a` when there's no honest figure to show (unpriced candidate, no
+  verdicts, or zero judged successes) rather than a misleading number.
+- **`--judge` now warns below 20 samples.** A judge verdict built on a
+  handful of prompts is noisy; frugon now prints a heads-up recommending
+  25-30 samples for a steadier read, rather than staying silent about it.
 - **`--judge` and `--judge-model` now fail fast when their prerequisite is
   missing.** Passing `--judge` without `--measure`, or `--judge-model`
   without `--judge`, used to run the analysis and silently ignore the flag.
