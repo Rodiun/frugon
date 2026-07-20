@@ -251,17 +251,41 @@ class Comparison:
 
 @dataclass
 class Tier1Tally:
-    """Win/loss/tie counts for one candidate model from judge evaluation."""
+    """Win/loss/tie counts for one candidate model from judge evaluation.
+
+    ``both_failed_ties`` counts the subset of ``ties`` flagged both-failed (see
+    :attr:`Comparison.both_failed`) — a tie where NEITHER side addressed the
+    prompt, not a genuine equally-good result.  It is a strict subset of
+    ``ties`` (``both_failed_ties <= ties`` always), tallied from the same
+    verdict pass so it never drifts from the printed Win/Loss/Tie/Error counts.
+    """
 
     candidate: str
     wins: int = 0
     losses: int = 0
     ties: int = 0
     errors: int = 0
+    both_failed_ties: int = 0
 
     @property
     def total(self) -> int:
         return self.wins + self.losses + self.ties + self.errors
+
+    @property
+    def verdict_count(self) -> int:
+        """Comparisons that reached a scored verdict (errors excluded)."""
+        return self.wins + self.losses + self.ties
+
+    @property
+    def judged_success_count(self) -> int:
+        """wins + (ties NOT flagged both-failed) — never counts a shared failure.
+
+        A pairwise TIE alone is silent about whether both sides tied on being
+        equally good or equally failing the prompt; ``both_failed_ties`` is the
+        FRG-OSS-068 correction that keeps this count honest (a both-failed tie
+        is a shared failure, not a judged success).
+        """
+        return self.wins + self.ties - self.both_failed_ties
 
 
 @dataclass
@@ -1851,6 +1875,8 @@ def run_measure(
                     tally.losses += 1
                 elif verdict == "tie":
                     tally.ties += 1
+                    if both_failed[c_idx]:
+                        tally.both_failed_ties += 1
                 else:
                     tally.errors += 1
         comparisons.append(

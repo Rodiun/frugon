@@ -1369,6 +1369,126 @@ def _reconciled_delta_pct(
     return cur_q, proj_q, pct
 
 
+# ---------------------------------------------------------------------------
+# Effective cost per judged success — price ÷ P(judged success)
+# ---------------------------------------------------------------------------
+#
+# The judge already produces win/tie/loss verdicts and the cost analysis
+# already produces a $ figure for the candidate, but the two render in
+# separate sections — nobody sees price ÷ P(judged success), the metric that
+# shows whether a cheaper model that fails more often is actually cheaper per
+# successful outcome (FRG-OSS-057).
+
+
+def _reconciled_effective_cost_per_success(
+    price: Decimal, success_count: int, verdict_count: int
+) -> Decimal | None:
+    """Return ``price ÷ P(judged success)``, or ``None`` for "n/a (0 judged successes)".
+
+    *price* is the RAW $ figure this run already shows for the candidate
+    elsewhere (the split/wholesale headline "New" figure, or the "Candidates
+    considered" block's own projection) — quantized here to its
+    :func:`_fmt_usd` display precision FIRST, so the returned effective figure
+    always divides the exact number the user has already seen on screen, never
+    a raw value that could disagree with it.
+
+    *success_count* / *verdict_count* are integer counts (``Tier1Tally.
+    judged_success_count`` / ``.verdict_count``) — exact, not rounded, so the
+    success rate used for the division is the true fraction, verifiable
+    against the printed Win/Loss/Tie counts alone.
+
+    Returns ``None`` when *success_count* is 0 — never a divide-by-zero, never
+    an infinite value.
+    """
+    if success_count <= 0:
+        return None
+    _TWO = Decimal("0.01")
+    _FOUR = Decimal("0.0001")
+    _SIX = Decimal("0.000001")
+    if Decimal("0") < price < _FOUR:
+        quantized_price = price.quantize(_SIX, rounding=ROUND_HALF_UP)
+    elif Decimal("0") < price < _TWO:
+        quantized_price = price.quantize(_FOUR, rounding=ROUND_HALF_UP)
+    else:
+        quantized_price = price.quantize(_TWO, rounding=ROUND_HALF_UP)
+    success_rate = Decimal(success_count) / Decimal(verdict_count)
+    return quantized_price / success_rate
+
+
+def _candidate_shown_price(
+    result: AnalysisResult | None, candidate: str
+) -> tuple[Decimal, bool] | None:
+    """Return ``(price, is_monthly)`` for the $ figure THIS RUN ALREADY PRINTED for
+    *candidate*, or ``None`` when no such figure exists.
+
+    Resolution order mirrors exactly which panel is the headline (so the price
+    fed into the effective-$/success line can never be a number the report
+    didn't already show):
+
+      1. The split headline's blended New-spend, when *candidate* is the
+         split's routing target AND the split is the ACTUAL rendered headline
+         (:func:`_has_split`) — :func:`_split_report_figures`.
+      2. The wholesale headline's full-swap New-spend, when *candidate* is the
+         analysis engine's own recommended candidate — :func:`_wholesale_current_and_new`.
+      3. The "Candidates considered" block's own per-candidate projection
+         (monthly, else observed) — the multi-candidate explicit ``--candidates``
+         path.
+
+    Returns ``None`` when none of the above has a price for *candidate* (e.g.
+    an explicit ``--candidates`` model that is neither the headline nor priced
+    into the block) — the caller renders "n/a (unpriced)" rather than
+    fabricating a figure.
+    """
+    if result is None:
+        return None
+    if (
+        _has_split(result)
+        and result.split is not None
+        and result.split.candidate_model == candidate
+    ):
+        fig = _split_report_figures(result, result.split)
+        return fig.blended, fig.projected
+    if result.candidate_model == candidate:
+        _current, new, projected = _wholesale_current_and_new(result)
+        return new, projected
+    for proj in result.candidate_projections:
+        if proj.model == candidate:
+            if proj.monthly_cost is not None:
+                return proj.monthly_cost, True
+            if proj.observed_cost is not None:
+                return proj.observed_cost, False
+    return None
+
+
+def _effective_cost_per_success_text(
+    tally: Tier1Tally, result: AnalysisResult | None
+) -> str | None:
+    """Return the shared "Eff. $/success" cell text for *tally*, or ``None``.
+
+    ``None`` means the caller should omit the metric ENTIRELY for this run —
+    only when *result* itself is None (a directly-constructed
+    :class:`MeasureResult` with no cost context), so a run rendered without an
+    :class:`AnalysisResult` stays byte-identical to before this metric existed.
+    With a real *result*, every tally gets a cell: the effective $ figure,
+    "n/a (0 judged successes)" when the candidate has no judged success, or
+    "n/a (unpriced)" when this run's cost analysis has no $ figure at all for
+    the candidate.
+    """
+    if result is None:
+        return None
+    priced = _candidate_shown_price(result, tally.candidate)
+    if priced is None:
+        return "n/a (unpriced)"
+    price, is_monthly = priced
+    effective = _reconciled_effective_cost_per_success(
+        price, tally.judged_success_count, tally.verdict_count
+    )
+    if effective is None:
+        return "n/a (0 judged successes)"
+    suffix = "/mo" if is_monthly else ""
+    return f"{_fmt_usd(effective)}{suffix}"
+
+
 def _call_share_pcts(counts: list[int]) -> list[float]:
     """Return each count's share of the total as one-decimal percents summing to 100.0.
 
@@ -3684,6 +3804,13 @@ def render_quality_terminal(
         judge_table.add_column("Tie", justify="right", style="yellow")
         judge_table.add_column("Error", justify="right", style="dim")
         judge_table.add_column("Summary", justify="right", style="dim")
+        # Eff. $/success (FRG-OSS-057): only added when an AnalysisResult is in
+        # hand to price it — omitted entirely otherwise, so a directly-
+        # constructed MeasureResult with no cost context renders byte-identical
+        # to before this metric existed.
+        show_effective_cost = result is not None
+        if show_effective_cost:
+            judge_table.add_column("Eff. $/success", justify="right", style="dim")
 
         for tally in measure_result.tier1_tallies:
             non_error = tally.wins + tally.losses + tally.ties
@@ -3692,14 +3819,17 @@ def render_quality_terminal(
                 if non_error > 0
                 else "—"
             )
-            judge_table.add_row(
+            row = [
                 tally.candidate,
                 str(tally.wins),
                 str(tally.losses),
                 str(tally.ties),
                 str(tally.errors),
                 summary,
-            )
+            ]
+            if show_effective_cost:
+                row.append(_effective_cost_per_success_text(tally, result) or "")
+            judge_table.add_row(*row)
         rprint(judge_table)
         # Synthesis: tie the tally back to the offline quality estimate.
         _render_tier1_synthesis(measure_result, result=result)
@@ -4122,10 +4252,20 @@ def _quality_section_md(
         self_judge = _self_judge_caution_text(measure_result)
         if self_judge is not None:
             lines += [f"> ⚠ {self_judge}", ""]
-        lines += [
-            "| Candidate | Win | Loss | Tie | Error | Summary |",
-            "|-----------|----:|-----:|----:|------:|--------:|",
-        ]
+        # Eff. $/success column (FRG-OSS-057): only added when an
+        # AnalysisResult is in hand to price it — see the terminal renderer's
+        # matching gate for why it's an all-or-nothing column.
+        show_effective_cost = result is not None
+        if show_effective_cost:
+            lines += [
+                "| Candidate | Win | Loss | Tie | Error | Summary | Eff. $/success |",
+                "|-----------|----:|-----:|----:|------:|--------:|----------------:|",
+            ]
+        else:
+            lines += [
+                "| Candidate | Win | Loss | Tie | Error | Summary |",
+                "|-----------|----:|-----:|----:|------:|--------:|",
+            ]
         for tally in measure_result.tier1_tallies:
             non_error = tally.wins + tally.losses + tally.ties
             summary = (
@@ -4133,10 +4273,14 @@ def _quality_section_md(
                 if non_error > 0
                 else "—"
             )
-            lines.append(
+            row = (
                 f"| `{tally.candidate}` | {tally.wins:,} | {tally.losses:,} "
                 f"| {tally.ties:,} | {tally.errors:,} | {summary} |"
             )
+            if show_effective_cost:
+                eff_text = _effective_cost_per_success_text(tally, result)
+                row += f" {eff_text} |"
+            lines.append(row)
         lines.append("")
         # Verdict synthesis — the SAME sentence the terminal renders, so the
         # report and the terminal never disagree.  Caution states carry a ⚠.
@@ -4409,6 +4553,10 @@ def _quality_section_html(
             parts.append(
                 f'<p class="quality-self-judge">&#9888; {esc(self_judge)}</p>'
             )
+        # Eff. $/success column (FRG-OSS-057): only added when an
+        # AnalysisResult is in hand to price it — see the terminal renderer's
+        # matching gate for why it's an all-or-nothing column.
+        show_effective_cost = result is not None
         rows = ""
         for tally in measure_result.tier1_tallies:
             non_error = tally.wins + tally.losses + tally.ties
@@ -4417,6 +4565,10 @@ def _quality_section_html(
                 if non_error > 0
                 else "—"
             )
+            eff_cell = ""
+            if show_effective_cost:
+                eff_text = esc(_effective_cost_per_success_text(tally, result) or "")
+                eff_cell = f'<td class="summary">{eff_text}</td>'
             rows += (
                 "<tr>"
                 f'<td class="cand">{esc(tally.candidate)}</td>'
@@ -4425,12 +4577,14 @@ def _quality_section_html(
                 f'<td class="t-tie">{tally.ties:,}</td>'
                 f"<td>{tally.errors:,}</td>"
                 f'<td class="summary">{esc(summary)}</td>'
+                f"{eff_cell}"
                 "</tr>"
             )
+        eff_header = "<th>Eff. $/success</th>" if show_effective_cost else ""
         parts.append(
             '<table class="quality-tally"><thead><tr>'
             "<th>Candidate</th><th>Win</th><th>Loss</th><th>Tie</th>"
-            "<th>Error</th><th>Summary</th>"
+            f"<th>Error</th><th>Summary</th>{eff_header}"
             f"</tr></thead><tbody>{rows}</tbody></table>"
         )
         # Verdict synthesis — verbatim from the shared classifier.  A
