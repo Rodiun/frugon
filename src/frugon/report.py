@@ -3374,6 +3374,13 @@ _VERDICT_LABEL_STYLE: dict[str, str] = {
 # on two good outputs — still resolves to plain ``error``.
 _VERDICT_NO_COMPARISON = "no_comparison"
 
+# Marker appended to a "tie" verdict label when the pointwise check
+# (frugon.measure._judge_addressed) found NEITHER side addressed the prompt —
+# the shared-failure case a pairwise TIE alone would hide (see
+# Comparison.both_failed's docstring).  Single-sourced so the terminal,
+# Markdown and HTML labels can never drift on the exact wording.
+_BOTH_FAILED_LABEL = "[both failed]"
+
 
 def _refine_prompt_verdict(comp: Comparison, pos: int) -> str:
     """Refine one prompt's ``error`` verdict into ``no_comparison`` where apt.
@@ -3403,7 +3410,7 @@ def _refine_prompt_verdict(comp: Comparison, pos: int) -> str:
     return "error"
 
 
-def _verdict_label(verdict: str) -> Text:
+def _verdict_label(verdict: str, *, both_failed: bool = False) -> Text:
     """Render a candidate's per-prompt verdict as a styled ``[WIN]``/``[LOSS]``…
 
     Returns a one-space-padded styled fragment to splice into the candidate's
@@ -3411,6 +3418,12 @@ def _verdict_label(verdict: str) -> Text:
     own "error" collapse to a dim ``[error]`` so the row is never blank or
     mislabelled; a :data:`_VERDICT_NO_COMPARISON` token renders a neutral
     ``[no comparison]`` (a working candidate the baseline failure left unscored).
+
+    *both_failed* appends a ``[both failed]`` marker (see
+    :data:`_BOTH_FAILED_LABEL`) ONLY when *verdict* is "tie" — the pointwise
+    check that produces this flag never runs for any other verdict, so it is a
+    silent no-op elsewhere rather than a caller-side guard duplicated at every
+    call site.
     """
     if verdict == _VERDICT_NO_COMPARISON:
         fragment = Text(" ")
@@ -3422,6 +3435,9 @@ def _verdict_label(verdict: str) -> Text:
         fragment.append("[error]", style="dim")
     else:
         fragment.append(f"[{verdict.upper()}]", style=style)
+    if verdict == "tie" and both_failed:
+        fragment.append(" ")
+        fragment.append(_BOTH_FAILED_LABEL, style="dim red")
     return fragment
 
 
@@ -3491,11 +3507,12 @@ def _render_comparison_outputs(
         # whole row carries the win/tie/loss signal, not a money-green name.
         if label_verdicts and pos < len(comp.verdicts):
             verdict = _refine_prompt_verdict(comp, pos)
+            both_failed = pos < len(comp.both_failed) and comp.both_failed[pos]
             # No-comparison is neutral (the candidate worked; only the baseline
             # failed), so the model name stays dim rather than red.
             label_style = _VERDICT_LABEL_STYLE.get(verdict, "dim")
             cand_prefix.append(f"{cand_out.model}", style=label_style)
-            cand_prefix.append_text(_verdict_label(verdict))
+            cand_prefix.append_text(_verdict_label(verdict, both_failed=both_failed))
             cand_prefix.append(": ")
         else:
             cand_prefix.append(f"{cand_out.model}:", style="green")
@@ -3905,15 +3922,19 @@ def _comparison_system_message(comp: Comparison) -> str | None:
     )
 
 
-def _verdict_md_label(verdict: str) -> str:
+def _verdict_md_label(verdict: str, *, both_failed: bool = False) -> str:
     """Map a per-prompt verdict to its Markdown text label (``[WIN]`` …).
 
     Unknown/empty verdicts and the judge's own "error" collapse to ``[error]``
     so a row is never blank or mislabelled — mirroring the terminal's
-    :func:`_verdict_label`.
+    :func:`_verdict_label`.  *both_failed* appends ``[both failed]`` (see
+    :data:`_BOTH_FAILED_LABEL`) ONLY when *verdict* is "tie".
     """
     if verdict in ("win", "loss", "tie"):
-        return f"[{verdict.upper()}]"
+        label = f"[{verdict.upper()}]"
+        if verdict == "tie" and both_failed:
+            label += f" {_BOTH_FAILED_LABEL}"
+        return label
     if verdict == _VERDICT_NO_COMPARISON:
         return "[no comparison]"
     return "[error]"
@@ -3932,16 +3953,23 @@ _VERDICT_HTML_CLASS: dict[str, str] = {
 }
 
 
-def _verdict_html_label(verdict: str) -> str:
+def _verdict_html_label(verdict: str, *, both_failed: bool = False) -> str:
     """Render a per-prompt verdict as a styled HTML ``<span>`` label.
 
     WIN reads green, LOSS red, TIE yellow (matching the tally table); an
     unknown/errored verdict collapses to a muted ``[error]``.  The verdict token
-    is already a safe literal, so no escaping is required.
+    is already a safe literal, so no escaping is required.  *both_failed* appends
+    a ``[both failed]`` span (see :data:`_BOTH_FAILED_LABEL`) ONLY when *verdict*
+    is "tie".
     """
     if verdict in ("win", "loss", "tie"):
         cls = _VERDICT_HTML_CLASS[verdict]
-        return f'<span class="{cls}">[{verdict.upper()}]</span>'
+        label = f'<span class="{cls}">[{verdict.upper()}]</span>'
+        if verdict == "tie" and both_failed:
+            label += (
+                f' <span class="verdict-both-failed">{_BOTH_FAILED_LABEL}</span>'
+            )
+        return label
     if verdict == _VERDICT_NO_COMPARISON:
         return '<span class="verdict-error">[no comparison]</span>'
     return '<span class="verdict-error">[error]</span>'
@@ -4009,6 +4037,9 @@ _QUALITY_HTML_CSS = """
 .verdict-loss{color:var(--red,#F87171);font-weight:600}
 .verdict-tie{color:#F59E0B;font-weight:600}
 .verdict-error{color:var(--ink-dim,#6B6B72)}
+/* Both-failed marker — a TIE the pointwise check found to be a SHARED failure
+   (neither side addressed the prompt), not two equally good answers. */
+.verdict-both-failed{color:var(--red,#F87171);font-weight:600}
 /* Promotion callout (Change 2) — a measured-confirmed unrated candidate that now
    saves more than the headline rated pick.  Positive (green), NOT amber: it is
    good news, the better route unlocked by verification. */
@@ -4299,7 +4330,9 @@ def _quality_prompt_md(
         cand_body = limits.truncate_output(cand_out.content)
         label = ""
         if label_verdicts and pos < len(comp.verdicts):
-            label = f" {_verdict_md_label(_refine_prompt_verdict(comp, pos))}"
+            verdict = _refine_prompt_verdict(comp, pos)
+            both_failed = pos < len(comp.both_failed) and comp.both_failed[pos]
+            label = f" {_verdict_md_label(verdict, both_failed=both_failed)}"
         if cand_body:
             lines += _md_fenced_output_lines(f"`{cand_out.model}`{label}:", cand_body)
         else:
@@ -4544,7 +4577,9 @@ def _quality_prompt_html(
         )
         label = ""
         if label_verdicts and pos < len(comp.verdicts):
-            label = " " + _verdict_html_label(_refine_prompt_verdict(comp, pos))
+            verdict = _refine_prompt_verdict(comp, pos)
+            both_failed = pos < len(comp.both_failed) and comp.both_failed[pos]
+            label = " " + _verdict_html_label(verdict, both_failed=both_failed)
         parts.append(
             '<div class="quality-output">'
             f'<span class="qo-model">{esc(cand_out.model)}</span>{label}: '

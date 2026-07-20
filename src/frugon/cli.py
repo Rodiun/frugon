@@ -349,6 +349,12 @@ def _render_measure_estimate(estimate: MeasureEstimate) -> None:
     asked for.  When NO target model could be priced the cost is replaced with
     "Estimated cost unavailable for <models>" but the call count is still shown.
     The whole line is dim — it is guidance, not a verdict.
+
+    When ``estimate.max_check_calls`` is non-zero (judge on), a trailing clause
+    discloses the pointwise "both failed" check's WORST-CASE extra call count —
+    those calls only fire on an actual TIE verdict, which is unknowable before
+    the run, so they are named "up to N more" rather than folded into the exact
+    ``planned_calls`` total (see :func:`frugon.measure.max_check_call_count`).
     """
     n_prompts = estimate.n_prompts
     n_candidates = estimate.n_candidates
@@ -383,6 +389,16 @@ def _render_measure_estimate(estimate: MeasureEstimate) -> None:
             f" + {judge_calls:,} to judge "
             f"({_plural(n_prompts, 'prompt')} × {_plural(n_candidates, 'candidate')})"
         )
+        # A THIRD, worst-case leg: pointwise "both failed" checks only fire on an
+        # actual TIE verdict, which is unknowable before the run — so it is named
+        # "up to N more" and is NOT added to planned_calls (which stays the exact
+        # sample+judge total).  Omitted entirely when the leg is 0 (no candidates
+        # or no prompts), keeping the common-case sentence unchanged.
+        if estimate.max_check_calls > 0:
+            plan_clause += (
+                f", up to {estimate.max_check_calls:,} more to check ties for "
+                "shared failure"
+            )
     else:
         # Only the sampling leg — sample_calls == planned_calls.  Stating both
         # ("N calls: N to sample") would repeat the number, so state the models
