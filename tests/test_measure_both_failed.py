@@ -39,6 +39,7 @@ from frugon.measure import (
     run_measure,
 )
 from frugon.report import (
+    _check_error_footnote_text,
     _quality_section_md,
     _verdict_html_label,
     _verdict_label,
@@ -463,6 +464,43 @@ def test_run_measure_check_errors_counts_retry_exhausted_pointwise_check() -> No
     # The fault-defaulted "addressed" still counts as NOT both-failed --
     # the ambiguous-parse/fault default is honest and conservative, unchanged.
     assert tally.both_failed_ties == 0
+
+
+def test_shared_baseline_fault_flags_every_candidate_on_that_prompt() -> None:
+    """One faulted BASELINE check is shared across all candidates on the
+    prompt, so each candidate's tally is affected -- the footnote must
+    describe affected comparisons, not failed check calls.
+    """
+    records = [_make_record()]
+
+    def _stub_call_model(_litellm: object, model: str, _messages: Any, *, is_baseline: bool = False) -> SampledOutput:
+        content = "baseline output" if is_baseline else "candidate output"
+        return SampledOutput(model=model, content=content)
+
+    faulting_litellm = MagicMock()
+    faulting_litellm.completion.side_effect = RuntimeError("network error")
+
+    with (
+        patch("frugon.measure._import_litellm", return_value=faulting_litellm),
+        patch("frugon.measure._call_model", side_effect=_stub_call_model),
+        patch("frugon.measure._judge_pair", return_value="tie"),
+    ):
+        result = run_measure(
+            records,
+            "gpt-4o",
+            ["gpt-4o-mini", "claude-haiku"],
+            n_samples=1,
+            use_judge=True,
+            judge_model="gpt-4o",
+            concurrency=1,
+            seed=0,
+        )
+
+    assert result.tier1_tallies is not None
+    assert [t.check_errors for t in result.tier1_tallies] == [1, 1]
+    note = _check_error_footnote_text(result)
+    assert note is not None
+    assert "2 judged comparisons" in note
 
 
 # ---------------------------------------------------------------------------

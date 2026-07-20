@@ -501,8 +501,10 @@ class TestReconciliation:
         assert dollar_matches, "expected an effective-cost figure on the same row"
         rendered_effective = dollar_matches[-1]
 
-        price, _is_monthly = _candidate_shown_price(result, split.candidate_model)  # type: ignore[misc]
-        expected = _fmt_usd(price / (Decimal(n) / Decimal(m)))
+        priced = _candidate_shown_price(result, split.candidate_model)
+        assert priced is not None
+        price, _is_monthly = priced
+        expected = _fmt_usd(_quantize_usd_for_display(price) / (Decimal(n) / Decimal(m)))
         assert rendered_effective == expected
 
 
@@ -615,7 +617,31 @@ class TestCheckErrorMarker:
         mr = _measure_result("gpt-4o-mini", tally)
         note = _check_error_footnote_text(mr)
         assert note is not None
-        assert "2 shared-failure checks could not complete" in note
+        assert "2 judged comparisons could not complete a shared-failure check" in note
+
+    def test_terminal_renders_check_error_footnote(self) -> None:
+        result, split = _split_result()
+        tally = _tally(candidate=split.candidate_model)
+        tally.check_errors = 2
+        out = _capture_terminal(_measure_result(split.candidate_model, tally), result)
+        assert "could not complete" in out
+        assert "blended spend" in out  # W5 footnote, same surface
+
+    def test_markdown_renders_both_footnotes(self) -> None:
+        result, split = _split_result()
+        tally = _tally(candidate=split.candidate_model)
+        tally.check_errors = 2
+        md = "\n".join(_quality_section_md(_measure_result(split.candidate_model, tally), result=result))
+        assert "> ~ 2 judged comparisons" in md
+        assert "_Eff. $/success for the routed candidate uses blended spend" in md
+
+    def test_html_renders_both_footnotes(self) -> None:
+        result, split = _split_result()
+        tally = _tally(candidate=split.candidate_model)
+        tally.check_errors = 2
+        html = _quality_section_html(_measure_result(split.candidate_model, tally), result=result)
+        assert 'class="quality-check-error"' in html
+        assert 'class="quality-split-price-note"' in html
 
 
 # ---------------------------------------------------------------------------
@@ -648,11 +674,17 @@ class TestSplitPricedFootnote:
 
 
 class TestUniformPriceBasis:
-    def test_monthly_basis_true_when_any_candidate_is_monthly(self) -> None:
+    def test_monthly_basis_true_when_every_candidate_is_monthly(self) -> None:
         result = _multi_candidate_result()
+        for proj in result.candidate_projections:
+            if proj.status != "unpriced":
+                proj.monthly_cost = Decimal("9.00")
         result.candidate_projections.append(
             CandidateProjection(
-                model="mistral-small", status="considered", monthly_cost=Decimal("9.00")
+                model="mistral-small",
+                status="considered",
+                monthly_cost=Decimal("9.00"),
+                observed_cost=Decimal("0.90"),
             )
         )
         mr = _measure_result(
@@ -667,22 +699,23 @@ class TestUniformPriceBasis:
         )
         assert _candidates_use_monthly_basis(mr, result) is False
 
-    def test_observed_only_row_never_shows_per_month_suffix_when_table_prefers_monthly(
-        self,
-    ) -> None:
-        """A row whose own projection has no monthly figure must still show
-        its (unlabelled) observed figure, never a fabricated /mo suffix, even
-        when the table's dominant basis is monthly.
-        """
+    def test_one_observed_only_candidate_forces_observed_basis_for_all(self) -> None:
         result = _multi_candidate_result()
         result.candidate_projections.append(
             CandidateProjection(
-                model="mistral-small", status="considered", monthly_cost=Decimal("9.00")
+                model="mistral-small",
+                status="considered",
+                monthly_cost=Decimal("9.00"),
+                observed_cost=Decimal("0.90"),
             )
         )
-        observed_only_tally = _tally(candidate="gpt-4o-mini", wins=10, losses=0, ties=0)
-        text = _effective_cost_per_success_text(
-            observed_only_tally, result, prefer_monthly=True
-        )
-        assert text is not None
-        assert "/mo" not in text
+        mr = _measure_result("x", _tally(candidate="mistral-small"))
+        mr.tier1_tallies = [
+            _tally(candidate="mistral-small", wins=10, losses=0, ties=0, both_failed_ties=0),
+            _tally(candidate="gpt-4o-mini", wins=10, losses=0, ties=0, both_failed_ties=0),
+        ]
+        assert _candidates_use_monthly_basis(mr, result) is False
+        for tally in mr.tier1_tallies:
+            text = _effective_cost_per_success_text(tally, result, prefer_monthly=False)
+            assert text is not None
+            assert "/mo" not in text

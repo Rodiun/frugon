@@ -1477,20 +1477,26 @@ def _candidates_use_monthly_basis(
     """Return whether the "Eff. $/success" column should prefer the monthly basis.
 
     W6: the column exists to make candidates directly comparable, so mixing a
-    monthly figure on one row with an observed figure on another (both drawn
-    from :func:`_candidate_shown_price`'s per-candidate fallback) would
-    compare apples to oranges. True when ANY tallied candidate's default
-    resolution is monthly; callers then pass this back into every row's
-    :func:`_candidate_shown_price` call as *prefer_monthly* so the whole
-    column is decided ONCE, not row by row.
+    monthly figure on one row with an observed figure on another would compare
+    apples to oranges. ``observed_cost`` is ALWAYS populated for a priced
+    candidate (see :func:`frugon.cost.build_analysis_result`), while
+    ``monthly_cost`` is ``None`` whenever the run has no monthly factor -- a
+    uniform basis is therefore always achievable, so the rule is all-or-nothing
+    on monthly: True only when EVERY priced tallied candidate resolves to a
+    monthly figure. A single observed-only candidate forces the whole column
+    to observed, since observed is always available. Callers then pass this
+    back into every row's :func:`_candidate_shown_price` call as
+    *prefer_monthly* so the whole column is decided ONCE, not row by row.
     """
     if result is None or not measure_result.tier1_tallies:
         return False
     for tally in measure_result.tier1_tallies:
         priced = _candidate_shown_price(result, tally.candidate)
-        if priced is not None and priced[1]:
-            return True
-    return False
+        if priced is None:
+            continue  # unpriced rows render "n/a (unpriced)"; they do not vote
+        if not priced[1]:
+            return False  # one observed-only candidate forces observed for ALL
+    return True
 
 
 def _judged_success_summary(tally: Tier1Tally) -> str:
@@ -1525,7 +1531,9 @@ def _effective_cost_per_success_text(
     "n/a (no verdicts)" when every comparison errored (verdict_count == 0),
     "n/a (0 judged successes)" when the candidate has verdicts but no judged
     success, or "n/a (unpriced)" when this run's cost analysis has no $ figure
-    at all for the candidate.
+    at all for the candidate. "unpriced" is checked BEFORE "no verdicts", so a
+    candidate that is both unpriced and had every comparison error reports
+    only "unpriced" — a deliberate ordering, not a W2 regression.
 
     *prefer_monthly* is the table-wide basis decided once by
     :func:`_candidates_use_monthly_basis` (W6) — passed straight through to
@@ -1568,10 +1576,10 @@ def _check_error_footnote_text(measure_result: MeasureResult) -> str | None:
     total = sum(t.check_errors for t in measure_result.tier1_tallies)
     if total <= 0:
         return None
-    noun = "check" if total == 1 else "checks"
+    noun = "comparison" if total == 1 else "comparisons"
     return (
-        f"~ {total} shared-failure {noun} could not complete; the success "
-        "rate may be optimistic"
+        f"~ {total} judged {noun} could not complete a shared-failure check; "
+        "the success rate may be optimistic"
     )
 
 
@@ -4275,6 +4283,13 @@ _QUALITY_HTML_CSS = """
 /* Self-judge caution — amber trust signal, adjacent to the provenance caption,
    shown when the judge is itself one of the models it scored. */
 .quality-self-judge{font-size:.8rem;line-height:1.5;margin:-.25rem 0 .75rem;color:#F59E0B}
+/* Split price-basis note — quiet, dim; names the blended-spend basis behind
+   the routed candidate's Eff. $/success figure. */
+.quality-split-price-note{font-size:.78rem;line-height:1.5;margin:-.25rem 0 .75rem;color:var(--ink-dim,#6B6B72)}
+/* Shared-failure check-error caution — amber, matching the terminal/Markdown
+   caution weight; a fault-defaulted pointwise check may be masking a real
+   shared failure. */
+.quality-check-error{font-size:.8rem;line-height:1.5;margin:-.25rem 0 .75rem;color:#F59E0B}
 .quality-prompt{margin:1rem 0 .25rem;padding-top:.75rem;border-top:1px solid var(--surface-2,#151515)}
 .quality-prompt .qp-label{
   font-family:ui-monospace,'JetBrains Mono','Cascadia Code','SF Mono',Menlo,Consolas,monospace;
